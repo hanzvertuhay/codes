@@ -25,16 +25,20 @@ import sys
 # Logging to file
 logging.basicConfig(filename='balance_log.txt', level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# Load BIP-39 wordlist from GitHub
+# Load BIP-39 wordlist
 def load_bip39_wordlist():
+    local_path = os.path.join(os.path.dirname(__file__), "english.txt")
+    if os.path.exists(local_path):
+        with open(local_path, "r", encoding="utf-8") as f:
+            return f.read().splitlines()
     url = "https://raw.githubusercontent.com/bitcoin/bips/master/bip-0039/english.txt"
     try:
         response = requests.get(url, timeout=5)
         response.raise_for_status()
         return response.text.splitlines()
     except Exception as e:
-        messagebox.showerror("Error", f"Failed to load BIP-39 wordlist: {e}")
-        sys.exit(1)
+        print(f"Failed to load BIP-39 wordlist: {e}", file=sys.stderr)
+        return []
 
 BIP39_WORDLIST = load_bip39_wordlist()
 
@@ -347,7 +351,10 @@ def get_evm_token_balance(addr, contract, rpc_list, proxy=None, timeout=5):
     data = '0x70a08231' + '000000000000000000000000' + addr[2:].zfill(64)
     payload = {"to": contract, "data": data}
     result = check_balance_rpc(rpc_list, "eth_call", [payload, "latest"], proxy, timeout)
-    return int(result or '0x0', 16) / 10**6
+    value = "0x0"
+    if isinstance(result, dict):
+        value = result.get("result", "0x0")
+    return int(value, 16) / 10**6
 
 # NETWORKS (removed cardano and litecoin due to API key requirements; add if you have keys)
 NETWORKS = {
@@ -417,12 +424,12 @@ NETWORKS = {
 
 # EVM_CHAINS (example ones; add more as needed with public RPCs without keys)
 EVM_CHAINS = {
-    "karura_network": {"chain_id": 686, "rpc": ["https://eth-rpc-karura.aca-api.network"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int(check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or 0, 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
-    "ethereum_classic": {"chain_id": 61, "rpc": ["https://www.ethercluster.com/etc"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int(check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or 0, 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
-    "boba_network": {"chain_id": 288, "rpc": ["https://mainnet.boba.network"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int(check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or 0, 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
-    "bnb_smart_chain_mainnet": {"chain_id": 56, "rpc": ["https://bsc-dataseed.binance.org/"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int(check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or 0, 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0x55d398326f99059fF775485246999027B3197955", rpc, proxy, timeout)},
+    "karura_network": {"chain_id": 686, "rpc": ["https://eth-rpc-karura.aca-api.network"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int((check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or {}).get('result', '0x0'), 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
+    "ethereum_classic": {"chain_id": 61, "rpc": ["https://www.ethercluster.com/etc"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int((check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or {}).get('result', '0x0'), 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
+    "boba_network": {"chain_id": 288, "rpc": ["https://mainnet.boba.network"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int((check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or {}).get('result', '0x0'), 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
+    "bnb_smart_chain_mainnet": {"chain_id": 56, "rpc": ["https://bsc-dataseed.binance.org/"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int((check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or {}).get('result', '0x0'), 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0x55d398326f99059fF775485246999027B3197955", rpc, proxy, timeout)},
     # Add more EVM chains here as needed (up to 336 if you have the list and public RPCs)
-    "geso_verse": {"chain_id": 42888, "rpc": ["https://rpc.gesotensei.0xshaggy.com"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int(check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or 0, 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
+    "geso_verse": {"chain_id": 42888, "rpc": ["https://rpc.gesotensei.0xshaggy.com"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int((check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or {}).get('result', '0x0'), 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
 }
 
 # check_btc_balance
