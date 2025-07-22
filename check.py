@@ -484,18 +484,23 @@ class SeedCheckerGUI:
         self.depth_entry.insert(0, "1")
         self.depth_entry.grid(row=4, column=1, padx=5, pady=5)
 
+        tk.Label(self.check_tab, text="Network batch fraction:").grid(row=5, column=0, padx=5, pady=5)
+        self.batch_entry = tk.Entry(self.check_tab, width=10)
+        self.batch_entry.insert(0, "1.0")
+        self.batch_entry.grid(row=5, column=1, padx=5, pady=5)
+
         self.start_check_btn = tk.Button(self.check_tab, text="Start Check", command=self.start_check)
-        self.start_check_btn.grid(row=5, column=1, pady=10)
+        self.start_check_btn.grid(row=6, column=1, pady=10)
 
         self.progress = ttk.Progressbar(self.check_tab, length=400, mode='determinate')
-        self.progress.grid(row=6, column=0, columnspan=3, padx=5, pady=5)
+        self.progress.grid(row=7, column=0, columnspan=3, padx=5, pady=5)
 
         self.stats_label = tk.Label(self.check_tab, text="Processed: 0/0 | Speed: 0/s | Errors: 0 conn, 0 proj, 0 timeout")
-        self.stats_label.grid(row=7, column=0, columnspan=3, padx=5, pady=5)
+        self.stats_label.grid(row=8, column=0, columnspan=3, padx=5, pady=5)
 
         # Visual log
         self.log_text = tk.Text(self.check_tab, height=10, state='disabled')
-        self.log_text.grid(row=8, column=0, columnspan=4, padx=5, pady=5, sticky="nsew")
+        self.log_text.grid(row=9, column=0, columnspan=4, padx=5, pady=5, sticky="nsew")
 
         # Address Generator tab
         self.gen_tab = ttk.Frame(self.notebook)
@@ -576,8 +581,11 @@ class SeedCheckerGUI:
             threads = int(self.threads_entry.get())
             timeout = int(self.timeout_entry.get())
             depth = int(self.depth_entry.get())
+            batch_fraction = float(self.batch_entry.get())
+            if not (0 < batch_fraction <= 1):
+                raise ValueError
         except ValueError:
-            messagebox.showerror("Error", "Invalid input for threads, timeout, or depth")
+            messagebox.showerror("Error", "Invalid input for threads, timeout, depth, or batch fraction")
             return
 
         seeds = self.load_list(seeds_path)
@@ -596,9 +604,9 @@ class SeedCheckerGUI:
         self.start_check_btn.config(state='disabled')
         self.log_message("Starting check...")
 
-        threading.Thread(target=self.run_check, args=(seeds, self.proxies, threads, timeout, depth)).start()
+        threading.Thread(target=self.run_check, args=(seeds, self.proxies, threads, timeout, depth, batch_fraction)).start()
 
-    def run_check(self, seeds, proxies, threads, timeout, depth):
+    def run_check(self, seeds, proxies, threads, timeout, depth, batch_fraction):
         proxy_idx = [0]
 
         def check_seed(seed_str):
@@ -611,7 +619,11 @@ class SeedCheckerGUI:
                     self.log_message(f"Invalid seed length for {seed_str}")
                     return
                 seed = mnemonic_to_seed(seed_str)
-                for net_name, net in {**NETWORKS, **EVM_CHAINS}.items():
+                networks = list({**NETWORKS, **EVM_CHAINS}.items())
+                batch_size = max(1, int(len(networks) * batch_fraction))
+
+                def process_network(item):
+                    net_name, net = item
                     self.log_message(f"  Network: {net_name}")
                     try:
                         for path_template in net.get("paths", []):
@@ -624,9 +636,6 @@ class SeedCheckerGUI:
                                         pub = get_public_key(priv, net.get("ed25519"))
                                         addr = net["address_func"](pub)
                                         self.log_message(f"    Address: {addr} (path: {path})")
-                                        balance = 0
-                                        token_balance = 0
-                                        staking_balance = 0
                                         session = requests.Session()
                                         for _ in range(len(proxies) + 1 if proxies else 1):
                                             proxy = proxies[proxy_idx[0] % len(proxies)] if proxies else None
@@ -663,6 +672,14 @@ class SeedCheckerGUI:
                     except Exception as e:
                         self.proj_errors += 1
                         self.log_message(f"Error in network {net_name}: {e}")
+
+                for i in range(0, len(networks), batch_size):
+                    batch = networks[i:i + batch_size]
+                    with ThreadPoolExecutor(max_workers=len(batch)) as net_executor:
+                        futures = [net_executor.submit(process_network, item) for item in batch]
+                        for _ in as_completed(futures):
+                            pass
+
                 self.processed += 1
                 self.queue.put("update")
             except Exception as e:
