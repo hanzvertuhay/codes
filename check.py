@@ -11,6 +11,7 @@ import unicodedata
 import random
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
+import argparse
 from queue import Queue
 import logging
 import threading
@@ -25,18 +26,42 @@ import sys
 # Logging to file
 logging.basicConfig(filename='balance_log.txt', level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# Load BIP-39 wordlist from GitHub
+# Load BIP-39 wordlist
 def load_bip39_wordlist():
+    local_path = os.path.join(os.path.dirname(__file__), "english.txt")
+    if os.path.exists(local_path):
+        with open(local_path, "r", encoding="utf-8") as f:
+            return f.read().splitlines()
     url = "https://raw.githubusercontent.com/bitcoin/bips/master/bip-0039/english.txt"
     try:
         response = requests.get(url, timeout=5)
         response.raise_for_status()
         return response.text.splitlines()
     except Exception as e:
-        messagebox.showerror("Error", f"Failed to load BIP-39 wordlist: {e}")
-        sys.exit(1)
+        print(f"Failed to load BIP-39 wordlist: {e}", file=sys.stderr)
+        return []
 
 BIP39_WORDLIST = load_bip39_wordlist()
+
+# Helper to load a list of lines from a file path or URL
+def load_list(path_or_url):
+    if not path_or_url:
+        return []
+    if path_or_url.startswith(("http://", "https://")):
+        try:
+            response = requests.get(path_or_url, timeout=5)
+            response.raise_for_status()
+            return response.text.splitlines()
+        except Exception as e:
+            print(f"Failed to load from URL: {e}")
+            return []
+    else:
+        try:
+            with open(path_or_url, 'r') as f:
+                return f.read().splitlines()
+        except Exception as e:
+            print(f"Failed to load file: {e}")
+            return []
 
 # Pure Base58 implementation
 def base58_encode(data):
@@ -347,7 +372,10 @@ def get_evm_token_balance(addr, contract, rpc_list, proxy=None, timeout=5):
     data = '0x70a08231' + '000000000000000000000000' + addr[2:].zfill(64)
     payload = {"to": contract, "data": data}
     result = check_balance_rpc(rpc_list, "eth_call", [payload, "latest"], proxy, timeout)
-    return int(result or '0x0', 16) / 10**6
+    value = "0x0"
+    if isinstance(result, dict):
+        value = result.get("result", "0x0")
+    return int(value, 16) / 10**6
 
 # NETWORKS (removed cardano and litecoin due to API key requirements; add if you have keys)
 NETWORKS = {
@@ -417,12 +445,12 @@ NETWORKS = {
 
 # EVM_CHAINS (example ones; add more as needed with public RPCs without keys)
 EVM_CHAINS = {
-    "karura_network": {"chain_id": 686, "rpc": ["https://eth-rpc-karura.aca-api.network"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int(check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or 0, 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
-    "ethereum_classic": {"chain_id": 61, "rpc": ["https://www.ethercluster.com/etc"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int(check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or 0, 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
-    "boba_network": {"chain_id": 288, "rpc": ["https://mainnet.boba.network"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int(check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or 0, 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
-    "bnb_smart_chain_mainnet": {"chain_id": 56, "rpc": ["https://bsc-dataseed.binance.org/"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int(check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or 0, 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0x55d398326f99059fF775485246999027B3197955", rpc, proxy, timeout)},
+    "karura_network": {"chain_id": 686, "rpc": ["https://eth-rpc-karura.aca-api.network"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int((check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or {}).get('result', '0x0'), 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
+    "ethereum_classic": {"chain_id": 61, "rpc": ["https://www.ethercluster.com/etc"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int((check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or {}).get('result', '0x0'), 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
+    "boba_network": {"chain_id": 288, "rpc": ["https://mainnet.boba.network"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int((check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or {}).get('result', '0x0'), 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
+    "bnb_smart_chain_mainnet": {"chain_id": 56, "rpc": ["https://bsc-dataseed.binance.org/"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int((check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or {}).get('result', '0x0'), 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0x55d398326f99059fF775485246999027B3197955", rpc, proxy, timeout)},
     # Add more EVM chains here as needed (up to 336 if you have the list and public RPCs)
-    "geso_verse": {"chain_id": 42888, "rpc": ["https://rpc.gesotensei.0xshaggy.com"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int(check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or 0, 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
+    "geso_verse": {"chain_id": 42888, "rpc": ["https://rpc.gesotensei.0xshaggy.com"], "paths": ["m/44'/60'/0'/0/0"], "address_func": eth_address, "balance_func": lambda addr, rpc, proxy, timeout, session: int((check_balance_rpc(rpc, "eth_getBalance", [addr, "latest"], proxy, timeout, session) or {}).get('result', '0x0'), 16) / 1e18, "token_func": lambda addr, rpc, proxy, timeout, session: get_evm_token_balance(addr, "0xdAC17F958D2ee523a2206206994597C13D831ec7", rpc, proxy, timeout)},
 }
 
 # check_btc_balance
@@ -441,6 +469,97 @@ def check_btc_balance(addr, proxy=None, timeout=5):
 def check_sol_balance(addr, rpc, proxy, timeout, session):
     result = check_balance_rpc(rpc, "getBalance", [addr], proxy, timeout, session)
     return result.get('result', {}).get('value', 0) / 10**9 if result else 0
+
+# --------------------------- CLI Support ---------------------------
+
+def check_seed_cli(seed_str, proxies, timeout, depth, batch_fraction):
+    print(f"Checking seed: {seed_str}")
+    words = seed_str.split()
+    if len(words) not in [12, 15, 24]:
+        print(f"Invalid seed length for {seed_str}")
+        return
+    seed = mnemonic_to_seed(seed_str)
+    networks = list({**NETWORKS, **EVM_CHAINS}.items())
+    batch_size = max(1, int(len(networks) * batch_fraction))
+    proxy_idx = [0]
+
+    def process_network(item):
+        net_name, net = item
+        print(f"  Network: {net_name}")
+        try:
+            for path_template in net.get("paths", []):
+                for acc in range(depth):
+                    for chg in [0, 1]:
+                        for idx in range(depth):
+                            path = path_template.format(i=acc, a=acc, c=chg, idx=idx)
+                            priv = derive_ed25519(seed, path) if net.get("ed25519") else derive_priv_key(seed, path)
+                            priv_hex = binascii.hexlify(priv).decode()
+                            pub = get_public_key(priv, net.get("ed25519"))
+                            addr = net["address_func"](pub)
+                            print(f"    Address: {addr} (path: {path})")
+                            session = requests.Session()
+                            for _ in range(len(proxies) + 1 if proxies else 1):
+                                proxy = proxies[proxy_idx[0] % len(proxies)] if proxies else None
+                                proxy_idx[0] += 1
+                                try:
+                                    balance = net["balance_func"](addr, net["rpc"], proxy, timeout, session)
+                                    if balance is not None and balance > 0:
+                                        logging.info(f"Seed: {seed_str} | Network: {net_name} | Address: {addr} | PrivateKey: {priv_hex} | Balance: {balance}")
+                                        print(f"      Positive balance: {balance}")
+                                    if "token_func" in net:
+                                        token_balance = net["token_func"](addr, net["rpc"], proxy, timeout, session)
+                                        if token_balance > 0:
+                                            logging.info(f"Seed: {seed_str} | Network: {net_name} | Address: {addr} | PrivateKey: {priv_hex} | Token Balance: {token_balance}")
+                                            print(f"      Positive token balance: {token_balance}")
+                                    if "staking_func" in net:
+                                        staking_balance = net["staking_func"](addr, net["rpc"], proxy, timeout, session)
+                                        if staking_balance > 0:
+                                            logging.info(f"Seed: {seed_str} | Network: {net_name} | Address: {addr} | PrivateKey: {priv_hex} | Staking Balance: {staking_balance}")
+                                            print(f"      Positive staking balance: {staking_balance}")
+                                    break
+                                except Timeout:
+                                    print("      Timeout error")
+                                except (HTTPError, RequestException) as e:
+                                    if isinstance(e, HTTPError) and e.response.status_code == 429:
+                                        print("      Rate limit, retrying")
+                                        continue
+                                    print(f"      Connection error: {e}")
+                                except Exception as e:
+                                    print(f"      Project error: {e}")
+        except Exception as e:
+            print(f"Error in network {net_name}: {e}")
+
+    for i in range(0, len(networks), batch_size):
+        batch = networks[i:i + batch_size]
+        with ThreadPoolExecutor(max_workers=len(batch)) as net_executor:
+            futures = [net_executor.submit(process_network, item) for item in batch]
+            for _ in as_completed(futures):
+                pass
+
+
+def run_check_cli(seeds, proxies, threads, timeout, depth, batch_fraction):
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = [executor.submit(check_seed_cli, seed, proxies, timeout, depth, batch_fraction) for seed in seeds]
+        for _ in as_completed(futures):
+            pass
+
+
+def generate_addresses_cli(seeds, depth):
+    for seed_str in seeds:
+        try:
+            seed = mnemonic_to_seed(seed_str)
+            for net_name, net in {**NETWORKS, **EVM_CHAINS}.items():
+                for path_template in net.get("paths", []):
+                    for acc in range(depth):
+                        path = path_template.format(i=acc, a=acc, c=0, idx=0)
+                        priv = derive_ed25519(seed, path) if net.get("ed25519") else derive_priv_key(seed, path)
+                        priv_hex = binascii.hexlify(priv).decode()
+                        pub = get_public_key(priv, net.get("ed25519"))
+                        addr = net["address_func"](pub)
+                        print(f"{net_name} - Address: {addr} : Mnemonic: {seed_str} : PrivateKey: {priv_hex}")
+        except Exception as e:
+            print(f"Error generating for seed {seed_str}: {e}")
+
 
 # GUI with visual log
 class SeedCheckerGUI:
@@ -750,5 +869,28 @@ class SeedCheckerGUI:
         self.root.after(100, self.process_queue)
 
 if __name__ == "__main__":
-    app = SeedCheckerGUI()
-    app.root.mainloop()
+    parser = argparse.ArgumentParser(description="Seed Phrase Checker")
+    parser.add_argument("--seeds", help="Seeds file or URL")
+    parser.add_argument("--proxies", help="Proxies file or URL", default="")
+    parser.add_argument("--threads", type=int, default=10)
+    parser.add_argument("--timeout", type=int, default=5)
+    parser.add_argument("--depth", type=int, default=1)
+    parser.add_argument("--batch-fraction", type=float, default=1.0)
+    parser.add_argument("--generate", action="store_true", help="Generate addresses instead of checking balances")
+    parser.add_argument("--cli", action="store_true", help="Run in command-line mode")
+
+    args = parser.parse_args()
+
+    if args.cli or args.seeds:
+        seeds = load_list(args.seeds)
+        proxies = load_list(args.proxies)
+        if not seeds:
+            print("No seeds loaded")
+            sys.exit(1)
+        if args.generate:
+            generate_addresses_cli(seeds, args.depth)
+        else:
+            run_check_cli(seeds, proxies, args.threads, args.timeout, args.depth, args.batch_fraction)
+    else:
+        app = SeedCheckerGUI()
+        app.root.mainloop()
