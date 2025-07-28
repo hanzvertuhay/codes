@@ -181,29 +181,36 @@ class ExportWatcher:
     def __init__(self, user: User, proxy_url: Optional[str] = None):
         self.user = user
         self.proxy_url = proxy_url
-        self.sio = socketio.AsyncClient(logger=False, engineio_logger=False)
+        self.sio: Optional[socketio.AsyncClient] = None
+        self.session: Optional[aiohttp.ClientSession] = None
         self.connected = asyncio.Event()
         self.messages: List[Dict[str, Any]] = []
-        @self.sio.on("socketConnect:userConnected")
-        async def _a(msg):
-            self.connected.set()
-        @self.sio.on("job:success")
-        async def _b(event):
-            if event and isinstance(event, dict) and event.get("message", {}).get("fileUrl"):
-                self.messages.append(event)
+
     async def __aenter__(self):
         headers = {"Cookie": f"eversessionid={self.user.session_id}"}
         url = f"https://{self.user.domain}"
-        if self.proxy_url:
-            connector = ProxyConnector.from_url(self.proxy_url)
-        else:
-            connector = aiohttp.TCPConnector()
-        session = aiohttp.ClientSession(connector=connector)
-        await self.sio.connect(url, headers=headers, transports=["websocket"], http_session=session)
+        connector = ProxyConnector.from_url(self.proxy_url) if self.proxy_url else aiohttp.TCPConnector()
+        self.session = aiohttp.ClientSession(connector=connector)
+        self.sio = socketio.AsyncClient(logger=False, engineio_logger=False, http_session=self.session)
+
+        @self.sio.on("socketConnect:userConnected")
+        async def _a(msg):  # pragma: no cover - simple event handler
+            self.connected.set()
+
+        @self.sio.on("job:success")
+        async def _b(event):  # pragma: no cover - simple event handler
+            if event and isinstance(event, dict) and event.get("message", {}).get("fileUrl"):
+                self.messages.append(event)
+
+        await self.sio.connect(url, headers=headers, transports=["websocket"])
         await self.connected.wait()
         return self
+
     async def __aexit__(self, exc_type, exc, tb):
-        await self.sio.disconnect()
+        if self.sio:
+            await self.sio.disconnect()
+        if self.session:
+            await self.session.close()
 
 # proxy helpers
 
