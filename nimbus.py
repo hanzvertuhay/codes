@@ -12,7 +12,7 @@ from aiohttp_socks import ProxyConnector
 try:
     from PySide6.QtWidgets import (
         QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit,
-        QFileDialog, QSpinBox, QLineEdit
+        QFileDialog, QSpinBox, QLineEdit, QCheckBox
     )
     from PySide6.QtCore import QThread, Signal, QTimer
     GUI_AVAILABLE = True
@@ -231,13 +231,20 @@ def fetch_pool(url: str) -> str:
         raise Exception(f"Unexpected error fetching pool: {str(e)}")
 
 class ProxyRotator:
-    def __init__(self, proxies: List[str], ttl_minutes: int, fetch_url: Optional[str] = None):
+    def __init__(self, proxies: List[str], ttl_minutes: int, fetch_url: Optional[str] = None, enabled: bool = True):
         self.proxies = [normalize_proxy(p) for p in (proxies or [])]
         self.fetch_url = fetch_url
         self.ttl_ms = ttl_minutes * 60_000
         self._cur: Optional[str] = None
         self._until = 0
+        self.enabled = enabled
+
+    def set_enabled(self, val: bool) -> None:
+        self.enabled = val
+
     async def current(self) -> Optional[str]:
+        if not self.enabled:
+            return None
         now = int(time.time() * 1000)
         if self.fetch_url and (not self._cur or now >= self._until):
             try:
@@ -254,12 +261,15 @@ class ProxyRotator:
             self._cur = random.choice(self.proxies)
             self._until = now + self.ttl_ms
         return self._cur
+
     def invalidate(self):
         self._until = 0
+
     def set_list(self, proxies: List[str]):
         self.proxies = [normalize_proxy(p) for p in proxies]
         self._cur = None
         self._until = 0
+
     def count(self) -> int:
         return len(self.proxies)
 
@@ -411,7 +421,7 @@ if GUI_AVAILABLE:
         proxysig = Signal(int)
         statssig = Signal(str)
 
-        def __init__(self, accounts_file: Path, proxies_file: Optional[Path], out_root: Path, proxy_url: Optional[str], proxy_ttl_min: int, acc_conc: int, retries_account: int, note_conc: int, download_timeout: float):
+        def __init__(self, accounts_file: Path, proxies_file: Optional[Path], out_root: Path, proxy_url: Optional[str], proxy_ttl_min: int, acc_conc: int, retries_account: int, note_conc: int, download_timeout: float, no_proxy: bool = False):
             super().__init__()
             self.accounts_file = accounts_file
             self.proxies_file = proxies_file
@@ -422,13 +432,23 @@ if GUI_AVAILABLE:
             self.retries_account = retries_account
             self.note_conc = note_conc
             self.download_timeout = download_timeout
-            self.rot = ProxyRotator(read_lines(proxies_file) if proxies_file else [], proxy_ttl_min, proxy_url)
-
+            self.no_proxy = no_proxy
+            self.rot = ProxyRotator(read_lines(proxies_file) if proxies_file else [], proxy_ttl_min, proxy_url, not no_proxy)
+            
         def set_proxy_url(self, url: Optional[str]):
             self.proxy_url = url
             self.rot.fetch_url = url
 
+        def set_no_proxy(self, val: bool):
+            self.no_proxy = val
+            self.rot.set_enabled(not val)
+
         def reload_proxies(self):
+            if self.no_proxy:
+                self.rot.set_list([])
+                self.proxysig.emit(0)
+                return
+
             raw_file_list = read_lines(self.proxies_file) if self.proxies_file else []
             lst = [normalize_proxy(x) for x in raw_file_list]
             pool_loaded = 0
@@ -484,6 +504,8 @@ if GUI_AVAILABLE:
             row = QHBoxLayout(); row.addWidget(self.btnProx); row.addWidget(self.lblProx); lay.addLayout(row)
             self.poolEdit = QLineEdit(); self.poolEdit.setPlaceholderText("Proxy pool URL (optional)")
             lay.addWidget(self.poolEdit)
+            self.noProxyChk = QCheckBox("Без прокси")
+            lay.addWidget(self.noProxyChk)
             self.proxyCountLbl = QLabel("Proxies: 0")
             self.refreshBtn = QPushButton("Refresh proxies")
             prow = QHBoxLayout(); prow.addWidget(self.proxyCountLbl); prow.addWidget(self.refreshBtn); lay.addLayout(prow)
@@ -545,36 +567,43 @@ if GUI_AVAILABLE:
                 retries_account=self.spinRet.value(),
                 note_conc=self.spinNote.value(),
                 download_timeout=180.0,
+                no_proxy=self.noProxyChk.isChecked(),
             )
             self.worker.logsig.connect(self.onLog)
             self.worker.finsig.connect(self.onFin)
             self.worker.proxysig.connect(self.onProxyCount)
             self.worker.statssig.connect(self.onStats)
             self.worker.start()
-            self.refreshTimer.start(self.spinTTL.value() * 60_000)
+            if not self.noProxyChk.isChecked():
+                self.refreshTimer.start(self.spinTTL.value() * 60_000)
             self.btnStart.setEnabled(False)
             self.log.append("Старт...")
 
         def onRefreshProxies(self):
             if self.worker:
+                self.worker.set_no_proxy(self.noProxyChk.isChecked())
                 self.worker.set_proxy_url(self.poolEdit.text().strip() or None)
                 self.worker.reload_proxies()
             else:
-                raw_file_list = read_lines(self.proxies) if self.proxies else []
-                lst = [normalize_proxy(x) for x in raw_file_list]
-                pool = self.poolEdit.text().strip()
-                pool_loaded = 0
-                if pool:
-                    try:
-                        text = fetch_pool(pool)
-                        lines = load_proxies_from_text(text)
-                        pool_loaded = len(lines)
-                        lst.extend(lines)
-                        self.log.append(f"Proxy pool loaded successfully: {pool_loaded} proxies")
-                    except Exception as e:
-                        self.log.append(f"Proxy pool fetch error: {str(e)}")
-                self.proxyCountLbl.setText(f"Proxies: {len(lst)}")
-                self.log.append(f"Proxy preview: file={len(raw_file_list)} pool={pool_loaded} total={len(lst)}")
+                if self.noProxyChk.isChecked():
+                    self.proxyCountLbl.setText("Proxies: 0")
+                    self.log.append("Proxy preview: disabled")
+                else:
+                    raw_file_list = read_lines(self.proxies) if self.proxies else []
+                    lst = [normalize_proxy(x) for x in raw_file_list]
+                    pool = self.poolEdit.text().strip()
+                    pool_loaded = 0
+                    if pool:
+                        try:
+                            text = fetch_pool(pool)
+                            lines = load_proxies_from_text(text)
+                            pool_loaded = len(lines)
+                            lst.extend(lines)
+                            self.log.append(f"Proxy pool loaded successfully: {pool_loaded} proxies")
+                        except Exception as e:
+                            self.log.append(f"Proxy pool fetch error: {str(e)}")
+                    self.proxyCountLbl.setText(f"Proxies: {len(lst)}")
+                    self.log.append(f"Proxy preview: file={len(raw_file_list)} pool={pool_loaded} total={len(lst)}")
 
         def onProxyCount(self, n: int):
             self.proxyCountLbl.setText(f"Proxies: {n}")
@@ -587,8 +616,6 @@ if GUI_AVAILABLE:
 
         def onFin(self):
             self.log.append("Готово")
-            self.refreshTimer.stop()
-            self.btnStart.setEnabled(True)
             self.refreshTimer.stop()
             self.btnStart.setEnabled(True)
 
@@ -604,9 +631,15 @@ def main_cli() -> None:
     parser.add_argument("--retries", type=int, default=3, help="Retries per account")
     parser.add_argument("--proxy-ttl", type=int, default=10, help="Proxy TTL minutes")
     parser.add_argument("--timeout", type=float, default=180.0, help="Download timeout")
+    parser.add_argument("--no-proxy", action="store_true", help="Disable proxy usage")
     args = parser.parse_args()
 
-    rot = ProxyRotator(read_lines(Path(args.proxies)) if args.proxies else [], args.proxy_ttl, args.proxy_url)
+    rot = ProxyRotator(
+        read_lines(Path(args.proxies)) if args.proxies else [],
+        args.proxy_ttl,
+        args.proxy_url,
+        not args.no_proxy,
+    )
 
     async def _run():
         def log_cb(msg: str):
