@@ -11,8 +11,17 @@ from aiohttp_socks import ProxyConnector
 
 try:
     from PySide6.QtWidgets import (
-        QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit,
-        QFileDialog, QSpinBox, QLineEdit, QCheckBox
+        QApplication,
+        QWidget,
+        QVBoxLayout,
+        QHBoxLayout,
+        QLabel,
+        QPushButton,
+        QTextEdit,
+        QFileDialog,
+        QSpinBox,
+        QLineEdit,
+        QCheckBox,
     )
     from PySide6.QtCore import QThread, Signal, QTimer
     GUI_AVAILABLE = True
