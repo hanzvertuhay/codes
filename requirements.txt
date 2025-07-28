@@ -1,6 +1,7 @@
 base58
 ecdsa
 httpx_socks
+pathlib
 httpx
 socketio
 aiohttp
