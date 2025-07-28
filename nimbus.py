@@ -675,4 +675,5 @@ if __name__ == "__main__":
             except Exception:
                 pass
         w = App(); w.resize(1000, 720); w.show()
+
         sys.exit(app.exec())
