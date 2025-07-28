@@ -11,8 +11,22 @@ from aiohttp_socks import ProxyConnector
 
 try:
     from PySide6.QtWidgets import (
+
+        QApplication,
+        QWidget,
+        QVBoxLayout,
+        QHBoxLayout,
+        QLabel,
+        QPushButton,
+        QTextEdit,
+        QFileDialog,
+        QSpinBox,
+        QLineEdit,
+        QCheckBox,
+
         QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit,
         QFileDialog, QSpinBox, QLineEdit, QCheckBox
+
     )
     from PySide6.QtCore import QThread, Signal, QTimer
     GUI_AVAILABLE = True
@@ -69,7 +83,7 @@ class NimbusClient:
     def close(self):
         self.client.close()
 
-    def login(self, email: str, password: str) -> User:
+    def login(self, email: str, password: str, *, return_raw: bool = False):
         try:
             r = self.client.post(
                 "https://nimbusweb.me/auth/api/auth",
@@ -93,7 +107,8 @@ class NimbusClient:
             self.client.cookies.set("eversessionid", sid, domain=f".{host}")
             self.session_id = sid
             self.domain = host
-            return User(session_id=sid, domain=host)
+            user = User(session_id=sid, domain=host)
+            return (user, data) if return_raw else user
         except httpx.HTTPStatusError as e:
             raise BadCredentials(f"HTTP error during login: {e.response.status_code} {e.response.reason_phrase}")
         except ValueError:
@@ -294,7 +309,7 @@ def read_accounts(path: Path) -> List[Tuple[str,str]]:
 
 # core batch
 
-async def export_one_account(email: str, password: str, out_root: Path, rot: ProxyRotator, retries_account: int, note_conc: int, download_timeout: float, log: Callable[[str], None]|None) -> Tuple[str,bool,int,str]:
+async def export_one_account(email: str, password: str, out_root: Path, rot: ProxyRotator, retries_account: int, note_conc: int, download_timeout: float, log: Callable[[str], None]|None, extended_log: bool = False) -> Tuple[str,bool,int,str]:
     attempts = 0
     last_err = ''
     while attempts < retries_account:
@@ -309,8 +324,14 @@ async def export_one_account(email: str, password: str, out_root: Path, rot: Pro
             continue
         client = NimbusClient(proxy_url=proxy)
         try:
-            user = client.login(email, password)
+            user, resp_data = client.login(email, password, return_raw=True)
             if log: log(f"{email}: Logged in successfully")
+            if extended_log and log:
+                log(f"{email}: login response: {resp_data}")
+            # Здесь можно проанализировать resp_data и определить свои статусы
+            # Например:
+            # if resp_data.get('status') == 'bad':
+            #     return email, False, 0, 'BAD'
             workspaces: List[Dict[str,Any]] = []
             for org in client.get_organizations():
                 workspaces.extend(client.get_workspaces(org['globalId']))
@@ -389,7 +410,7 @@ async def export_one_account(email: str, password: str, out_root: Path, rot: Pro
     if log: log(f"{email}: Failed after retries - {last_err}")
     return email, False, 0, last_err or 'unknown'
 
-async def run_batch(accounts_file: Path, out_root: Path, rot: ProxyRotator, acc_conc: int, retries_account: int, note_conc: int, download_timeout: float, log_fn: Callable[[str], None]|None, stats_cb: Callable[[int,int,int,int], None]|None):
+async def run_batch(accounts_file: Path, out_root: Path, rot: ProxyRotator, acc_conc: int, retries_account: int, note_conc: int, download_timeout: float, log_fn: Callable[[str], None]|None, stats_cb: Callable[[int,int,int,int], None]|None, extended_log: bool = False):
     accounts = read_accounts(accounts_file)
     in_work = 0
     good = 0
@@ -402,7 +423,7 @@ async def run_batch(accounts_file: Path, out_root: Path, rot: ProxyRotator, acc_
         async with sem:
             in_work += 1
             if stats_cb: stats_cb(in_work, good, bad, error)
-            em, ok, cnt, err = await export_one_account(email, pwd, out_root, rot, retries_account, note_conc, download_timeout, log_fn)
+            em, ok, cnt, err = await export_one_account(email, pwd, out_root, rot, retries_account, note_conc, download_timeout, log_fn, extended_log)
             results.append((em, ok, cnt, err))
             in_work -= 1
             if ok:
@@ -427,7 +448,11 @@ if GUI_AVAILABLE:
         proxysig = Signal(int)
         statssig = Signal(str)
 
+
+        def __init__(self, accounts_file: Path, proxies_file: Optional[Path], out_root: Path, proxy_url: Optional[str], proxy_ttl_min: int, acc_conc: int, retries_account: int, note_conc: int, download_timeout: float, no_proxy: bool = False, extended_log: bool = False):
+
         def __init__(self, accounts_file: Path, proxies_file: Optional[Path], out_root: Path, proxy_url: Optional[str], proxy_ttl_min: int, acc_conc: int, retries_account: int, note_conc: int, download_timeout: float, no_proxy: bool = False):
+
             super().__init__()
             self.accounts_file = accounts_file
             self.proxies_file = proxies_file
@@ -439,6 +464,9 @@ if GUI_AVAILABLE:
             self.note_conc = note_conc
             self.download_timeout = download_timeout
             self.no_proxy = no_proxy
+
+            self.extended_log = extended_log
+
             self.rot = ProxyRotator(read_lines(proxies_file) if proxies_file else [], proxy_ttl_min, proxy_url, not no_proxy)
             
         def set_proxy_url(self, url: Optional[str]):
@@ -488,7 +516,11 @@ if GUI_AVAILABLE:
 
                 self.proxysig.emit(self.rot.count())
                 try:
+
+                    await run_batch(self.accounts_file, self.out_root, self.rot, self.acc_conc, self.retries_account, self.note_conc, self.download_timeout, log_cb, stats_cb, self.extended_log)
+
                     await run_batch(self.accounts_file, self.out_root, self.rot, self.acc_conc, self.retries_account, self.note_conc, self.download_timeout, log_cb, stats_cb)
+
                 except Exception as e:
                     self.logsig.emit(f"ERROR: {e}")
 
@@ -512,6 +544,11 @@ if GUI_AVAILABLE:
             lay.addWidget(self.poolEdit)
             self.noProxyChk = QCheckBox("Без прокси")
             lay.addWidget(self.noProxyChk)
+
+            self.verboseChk = QCheckBox("Расширенный лог")
+            lay.addWidget(self.verboseChk)
+
+
             self.proxyCountLbl = QLabel("Proxies: 0")
             self.refreshBtn = QPushButton("Refresh proxies")
             prow = QHBoxLayout(); prow.addWidget(self.proxyCountLbl); prow.addWidget(self.refreshBtn); lay.addLayout(prow)
@@ -574,6 +611,10 @@ if GUI_AVAILABLE:
                 note_conc=self.spinNote.value(),
                 download_timeout=180.0,
                 no_proxy=self.noProxyChk.isChecked(),
+
+                extended_log=self.verboseChk.isChecked(),
+
+
             )
             self.worker.logsig.connect(self.onLog)
             self.worker.finsig.connect(self.onFin)
@@ -638,6 +679,10 @@ def main_cli() -> None:
     parser.add_argument("--proxy-ttl", type=int, default=10, help="Proxy TTL minutes")
     parser.add_argument("--timeout", type=float, default=180.0, help="Download timeout")
     parser.add_argument("--no-proxy", action="store_true", help="Disable proxy usage")
+
+    parser.add_argument("--extended-log", action="store_true", help="Show server responses")
+
+
     args = parser.parse_args()
 
     rot = ProxyRotator(
@@ -652,7 +697,11 @@ def main_cli() -> None:
             print(msg)
         def stats_cb(i: int, g: int, b: int, e: int):
             print(f"In work: {i} | Good: {g} | Bad: {b} | Error: {e}")
+
+        await run_batch(Path(args.accounts), Path(args.out), rot, args.threads_acc, args.retries, args.threads_note, args.timeout, log_cb, stats_cb, args.extended_log)
+
         await run_batch(Path(args.accounts), Path(args.out), rot, args.threads_acc, args.retries, args.threads_note, args.timeout, log_cb, stats_cb)
+
 
     if sys.platform.startswith('win'):
         try:
@@ -675,5 +724,8 @@ if __name__ == "__main__":
             except Exception:
                 pass
         w = App(); w.resize(1000, 720); w.show()
+
+
+
 
         sys.exit(app.exec())
