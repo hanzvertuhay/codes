@@ -2,3 +2,9 @@ requests
 base58
 ecdsa
 httpx_socks
+pathlib
+httpx
+socketio
+aiohttp
+aiohttp_socks
+PySide6.QtWidgets
