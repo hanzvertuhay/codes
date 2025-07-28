@@ -49,17 +49,20 @@ class NimbusClient:
         transport = None
         if proxy_url and proxy_url.startswith(("socks5://", "socks4://", "socks://")):
             transport = SyncProxyTransport.from_url(proxy_url)
-        self.client = httpx.Client(
-            headers={
+        client_kwargs = {
+            "headers": {
                 "User-Agent": USER_AGENT,
                 "Accept": "*/*",
                 "Accept-Language": "en-GB,en;q=0.5",
             },
-            timeout=timeout,
-            follow_redirects=True,
-            proxies=None if transport else proxy_url,
-            transport=transport,
-        )
+            "timeout": timeout,
+            "follow_redirects": True,
+        }
+        if transport is not None:
+            client_kwargs["transport"] = transport
+        elif proxy_url is not None:
+            client_kwargs["proxies"] = proxy_url
+        self.client = httpx.Client(**client_kwargs)
         self.session_id: Optional[str] = None
         self.domain: Optional[str] = None
 
@@ -336,7 +339,10 @@ async def export_one_account(email: str, password: str, out_root: Path, rot: Pro
                 while time.time() < deadline and len(watcher.messages) < len(notes):
                     await asyncio.sleep(1)
             downloaded = 0
-            dl = httpx.Client(proxies=proxy, headers={"User-Agent": USER_AGENT}, timeout=download_timeout)
+            dl_kwargs = {"headers": {"User-Agent": USER_AGENT}, "timeout": download_timeout}
+            if proxy is not None:
+                dl_kwargs["proxies"] = proxy
+            dl = httpx.Client(**dl_kwargs)
             try:
                 for ev in watcher.messages:
                     msg = ev.get('message', {})
@@ -669,4 +675,5 @@ if __name__ == "__main__":
             except Exception:
                 pass
         w = App(); w.resize(1000, 720); w.show()
+
         sys.exit(app.exec())
