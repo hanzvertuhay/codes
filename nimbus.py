@@ -3,6 +3,7 @@ import sys, asyncio, time, json, re, random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Callable
+from httpx import Response
 import httpx
 from httpx_socks import SyncProxyTransport
 import socketio
@@ -46,7 +47,10 @@ HEADERS_POOL = {
 }
 
 class BadCredentials(Exception):
-    pass
+    def __init__(self, msg: str, response: Response | None = None):
+        super().__init__(msg)
+        self.response = response
+
 class TwoFARequired(Exception):
     pass
 
@@ -94,7 +98,7 @@ class NimbusClient:
             data = r.json()
             code = data.get("errorCode")
             if code != 0:
-                raise BadCredentials(f"errorCode={code}")
+                raise BadCredentials(f"errorCode={code}", r)
             sid = data["body"]["sessionId"]
             self.client.cookies.set("eversessionid", sid, domain=".nimbusweb.me")
             h = self.client.head("https://nimbusweb.me/client?t=regfsour:header", headers={"Referer": "https://nimbusweb.me/client"})
@@ -105,9 +109,9 @@ class NimbusClient:
             self.session_id = sid
             self.domain = host
             user = User(session_id=sid, domain=host)
-            return (user, data) if return_raw else user
+            return (user, data, r) if return_raw else user
         except httpx.HTTPStatusError as e:
-            raise BadCredentials(f"HTTP error during login: {e.response.status_code} {e.response.reason_phrase}")
+            raise BadCredentials(f"HTTP error during login: {e.response.status_code} {e.response.reason_phrase}", e.response)
         except ValueError:
             raise BadCredentials("Invalid JSON response during login")
         except KeyError:
@@ -321,10 +325,12 @@ async def export_one_account(email: str, password: str, out_root: Path, rot: Pro
             continue
         client = NimbusClient(proxy_url=proxy)
         try:
-            user, resp_data = client.login(email, password, return_raw=True)
+            user, resp_data, resp = client.login(email, password, return_raw=True)
             if log: log(f"{email}: Logged in successfully")
             if extended_log and log:
-                log(f"{email}: login response: {resp_data}")
+                log(f"{email}: login status: {resp.status_code}")
+                log(f"{email}: login headers: {dict(resp.headers)}")
+                log(f"{email}: login body: {resp.text}")
             # Здесь можно проанализировать resp_data и определить свои статусы
             # Например:
             # if resp_data.get('status') == 'bad':
@@ -382,6 +388,10 @@ async def export_one_account(email: str, password: str, out_root: Path, rot: Pro
             client.close()
             last_err = str(e)
             if log: log(f"{email}: Bad credentials - {last_err}")
+            if extended_log and log and getattr(e, "response", None):
+                log(f"{email}: response status: {e.response.status_code}")
+                log(f"{email}: response headers: {dict(e.response.headers)}")
+                log(f"{email}: response body: {e.response.text}")
             return email, False, 0, 'BAD'
         except TwoFARequired as e:
             client.close()
@@ -391,6 +401,10 @@ async def export_one_account(email: str, password: str, out_root: Path, rot: Pro
         except httpx.HTTPStatusError as e:
             last_err = f"HTTP error: {e.response.status_code} - {e.response.text[:200]}"
             if log: log(f"{email}: {last_err}")
+            if extended_log and log:
+                log(f"{email}: response status: {e.response.status_code}")
+                log(f"{email}: response headers: {dict(e.response.headers)}")
+                log(f"{email}: response body: {e.response.text}")
             client.close()
             if e.response.status_code in (401, 403):
                 return email, False, 0, 'BAD'
@@ -549,9 +563,6 @@ if GUI_AVAILABLE:
             lay.addWidget(self.poolEdit)
             self.noProxyChk = QCheckBox("Без прокси")
             lay.addWidget(self.noProxyChk)
-            self.verboseChk = QCheckBox("Расширенный лог")
-            lay.addWidget(self.verboseChk)
-
             self.verboseChk = QCheckBox("Расширенный лог")
             lay.addWidget(self.verboseChk)
 
