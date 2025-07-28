@@ -88,9 +88,9 @@ class NimbusClient:
         try:
             r = self.client.post(
                 "https://nimbusweb.me/auth/api/auth",
-                data={"login": email, "password": password},
+                json={"login": email, "password": password},
                 headers={
-                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "Content-Type": "application/json; charset=UTF-8",
                     "Referer": "https://nimbusweb.me/auth",
                 },
             )
