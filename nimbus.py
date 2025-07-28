@@ -1,9 +1,3 @@
- (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
-diff --git a/nimbus.py b/nimbus.py
-index b0c8550ee27bd893708b10970e27efd642a0b796..9e6bc8b55dad1d05297ec10557477e61a7ceb2da 100644
---- a/nimbus.py
-+++ b/nimbus.py
-@@ -1,40 +1,45 @@
  from __future__ import annotations
 -import sys, asyncio, time, json, re
 +import sys, asyncio, time, json, re, random
@@ -592,6 +586,3 @@ index b0c8550ee27bd893708b10970e27efd642a0b796..9e6bc8b55dad1d05297ec10557477e61
 +                pass
 +        w = App(); w.resize(1000, 720); w.show()
 +        sys.exit(app.exec())
- 
-EOF
-)
