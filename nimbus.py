@@ -178,6 +178,138 @@ class NimbusClient:
         r.raise_for_status()
         return r.json()["id"]
 
+
+class AsyncNimbusClient:
+    def __init__(self, proxy_url: Optional[str] = None, timeout: float = 60.0):
+        transport = None
+        if proxy_url and proxy_url.startswith(("socks5://", "socks4://", "socks://")):
+            from httpx_socks import AsyncProxyTransport
+            transport = AsyncProxyTransport.from_url(proxy_url)
+        client_kwargs = {
+            "headers": {
+                "User-Agent": USER_AGENT,
+                "Accept": "*/*",
+                "Accept-Language": "en-GB,en;q=0.5",
+            },
+            "timeout": timeout,
+            "follow_redirects": True,
+        }
+        if transport is not None:
+            client_kwargs["transport"] = transport
+        elif proxy_url is not None:
+            client_kwargs["proxies"] = proxy_url
+        self.client = httpx.AsyncClient(**client_kwargs)
+        self.session_id: Optional[str] = None
+        self.domain: Optional[str] = None
+
+    async def close(self):
+        await self.client.aclose()
+
+    async def login(self, email: str, password: str, *, return_raw: bool = False):
+        try:
+            r = await self.client.post(
+                "https://nimbusweb.me/auth/api/auth",
+                json={"login": email, "password": password},
+                headers={
+                    "Content-Type": "application/json; charset=UTF-8",
+                    "Referer": "https://nimbusweb.me/auth",
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+            code = data.get("errorCode")
+            if code != 0:
+                raise BadCredentials(f"errorCode={code}", r)
+            sid = data["body"]["sessionId"]
+            self.client.cookies.set("eversessionid", sid, domain=".nimbusweb.me")
+            h = await self.client.head(
+                "https://nimbusweb.me/client?t=regfsour:header",
+                headers={"Referer": "https://nimbusweb.me/client"},
+            )
+            if not h.is_success:
+                raise TwoFARequired("domain head failed")
+            host = httpx.URL(str(h.url)).host
+            self.client.cookies.set("eversessionid", sid, domain=f".{host}")
+            self.session_id = sid
+            self.domain = host
+            user = User(session_id=sid, domain=host)
+            return (user, data, r) if return_raw else user
+        except httpx.HTTPStatusError as e:
+            raise BadCredentials(
+                f"HTTP error during login: {e.response.status_code} {e.response.reason_phrase}",
+                e.response,
+            )
+        except ValueError:
+            raise BadCredentials("Invalid JSON response during login")
+        except KeyError:
+            raise BadCredentials("Missing expected fields in login response")
+
+    async def get_organizations(self) -> List[Dict[str, Any]]:
+        r = await self.client.get(
+            "https://teams.nimbusweb.me/api/organizations",
+            headers={"Referer": "https://teams.nimbusweb.me/client"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def get_workspaces(self, org_id: str) -> List[Dict[str, Any]]:
+        r = await self.client.get(
+            f"https://teams.nimbusweb.me/api/workspaces/{org_id}",
+            headers={"Referer": "https://teams.nimbusweb.me/client"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def list_notes(self, workspace: Dict[str, Any], page_size: int = 500) -> List[Dict[str, Any]]:
+        if not self.domain or not self.session_id:
+            raise RuntimeError("no session")
+        total = workspace.get("notesCount", 0)
+        notes: List[Dict[str, Any]] = []
+        offset = 0
+        while offset < total:
+            rng = json.dumps({"limit": page_size, "offset": offset})
+            r = await self.client.get(
+                f"https://{self.domain}/api/workspaces/{workspace['globalId']}/notes",
+                params={"range": rng},
+                headers={"Referer": f"https://{self.domain}/client"},
+            )
+            r.raise_for_status()
+            notes.extend(r.json())
+            offset += page_size
+        return notes
+
+    async def get_note_tags(self, note: Dict[str, Any]) -> List[str]:
+        if not self.domain:
+            raise RuntimeError("no domain")
+        r = await self.client.get(
+            f"https://{self.domain}/api/workspaces/{note['workspaceId']}/notes/{note['globalId']}/tags",
+            headers={"Referer": f"https://{self.domain}/client"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def start_export(self, note: Dict[str, Any], fmt: str = "html", timezone_minutes: int = 0) -> str:
+        if not self.domain:
+            raise RuntimeError("no domain")
+        payload = {
+            "language": "en",
+            "timezone": timezone_minutes,
+            "workspaceId": note["workspaceId"],
+            "noteGlobalId": note["globalId"],
+            "format": fmt,
+            "style": "normal",
+            "size": "normal",
+            "paperFormat": "A4",
+            "folders": {},
+        }
+        r = await self.client.post(
+            f"https://{self.domain}/api/workspaces/{note['workspaceId']}/notes/{note['globalId']}/export",
+            json=payload,
+            headers={"Referer": f"https://{self.domain}/client"},
+        )
+        r.raise_for_status()
+        return r.json()["id"]
+
 class ExportWatcher:
     def __init__(self, user: User, proxy_url: Optional[str] = None):
         self.user = user
@@ -300,6 +432,17 @@ class ProxyRotator:
     def invalidate(self):
         self._until = 0
 
+    def remove_proxy(self, proxy: str) -> None:
+        if not proxy:
+            return
+        try:
+            self.proxies.remove(proxy)
+        except ValueError:
+            return
+        if self._cur == proxy:
+            self._cur = None
+            self._until = 0
+
     def set_list(self, proxies: List[str]):
         self.proxies = [normalize_proxy(p, self.default_scheme) for p in proxies]
         self._cur = None
@@ -337,6 +480,7 @@ async def export_one_account(
     log: Callable[[str], None] | None,
     extended_log: bool = False,
     stop_event: Optional[asyncio.Event] = None,
+    use_async: bool = False,
 ) -> Tuple[str, bool, int, str]:
     stop_event = stop_event or asyncio.Event()
     attempts = 0
@@ -353,11 +497,14 @@ async def export_one_account(
                 log(f"{email}: {last_err}")
             await asyncio.sleep(1)
             continue
-        client = NimbusClient(proxy_url=proxy)
+        client = AsyncNimbusClient(proxy_url=proxy) if use_async else NimbusClient(proxy_url=proxy)
         try:
-            user, resp_data, resp = await asyncio.to_thread(
-                client.login, email, password, return_raw=True
-            )
+            if use_async:
+                user, resp_data, resp = await client.login(email, password, return_raw=True)
+            else:
+                user, resp_data, resp = await asyncio.to_thread(
+                    client.login, email, password, return_raw=True
+                )
             if log: log(f"{email}: Logged in successfully")
             if extended_log and log:
                 log(f"{email}: login status: {resp.status_code}")
@@ -368,18 +515,30 @@ async def export_one_account(
             # if resp_data.get('status') == 'bad':
             #     return email, False, 0, 'BAD'
             workspaces: List[Dict[str, Any]] = []
-            for org in await asyncio.to_thread(client.get_organizations):
-                workspaces.extend(
-                    await asyncio.to_thread(client.get_workspaces, org["globalId"])
-                )
-            notes: List[Dict[str, Any]] = []
-            for w in workspaces:
-                notes.extend(await asyncio.to_thread(client.list_notes, w))
-            for n in notes:
-                try:
-                    n["tags"] = await asyncio.to_thread(client.get_note_tags, n)
-                except Exception:
-                    n["tags"] = []
+            if use_async:
+                for org in await client.get_organizations():
+                    workspaces.extend(await client.get_workspaces(org["globalId"]))
+                notes: List[Dict[str, Any]] = []
+                for w in workspaces:
+                    notes.extend(await client.list_notes(w))
+                for n in notes:
+                    try:
+                        n["tags"] = await client.get_note_tags(n)
+                    except Exception:
+                        n["tags"] = []
+            else:
+                for org in await asyncio.to_thread(client.get_organizations):
+                    workspaces.extend(
+                        await asyncio.to_thread(client.get_workspaces, org["globalId"])
+                    )
+                notes: List[Dict[str, Any]] = []
+                for w in workspaces:
+                    notes.extend(await asyncio.to_thread(client.list_notes, w))
+                for n in notes:
+                    try:
+                        n["tags"] = await asyncio.to_thread(client.get_note_tags, n)
+                    except Exception:
+                        n["tags"] = []
             if not notes:
                 client.close()
                 if log: log(f"{email}: No notes found, considering success")
@@ -391,7 +550,10 @@ async def export_one_account(
                 loop = asyncio.get_running_loop()
                 async def start(n):
                     async with sem:
-                        await loop.run_in_executor(None, client.start_export, n, 'html', 0)
+                        if use_async:
+                            await client.start_export(n, 'html', 0)
+                        else:
+                            await loop.run_in_executor(None, client.start_export, n, 'html', 0)
                 await asyncio.gather(*(start(n) for n in notes))
                 deadline = time.time() + 300
                 while time.time() < deadline and len(watcher.messages) < len(notes):
@@ -400,7 +562,7 @@ async def export_one_account(
             dl_kwargs = {"headers": {"User-Agent": USER_AGENT}, "timeout": download_timeout}
             if proxy is not None:
                 dl_kwargs["proxies"] = proxy
-            dl = httpx.Client(**dl_kwargs)
+            dl = httpx.AsyncClient(**dl_kwargs) if use_async else httpx.Client(**dl_kwargs)
             try:
                 for ev in watcher.messages:
                     msg = ev.get("message", {})
@@ -409,19 +571,30 @@ async def export_one_account(
                     if not url:
                         continue
                     p = out_dir / name
-                    def _download():
-                        with dl.stream("GET", url) as r:
+                    if use_async:
+                        async with dl.stream("GET", url) as r:
                             r.raise_for_status()
                             with open(p, "wb") as f:
-                                for chunk in r.iter_bytes():
+                                async for chunk in r.aiter_bytes():
                                     f.write(chunk)
-                    await asyncio.to_thread(_download)
+                    else:
+                        def _download():
+                            with dl.stream("GET", url) as r:
+                                r.raise_for_status()
+                                with open(p, "wb") as f:
+                                    for chunk in r.iter_bytes():
+                                        f.write(chunk)
+                        await asyncio.to_thread(_download)
                     downloaded += 1
                     if log:
                         log(f"{email}: Downloaded {name}")
             finally:
-                dl.close()
-                client.close()
+                if use_async:
+                    await dl.aclose()
+                    await client.close()
+                else:
+                    dl.close()
+                    client.close()
             if log: log(f"{email}: Success, downloaded {downloaded} files")
             return email, True, downloaded, ''
         except BadCredentials as e:
@@ -453,14 +626,20 @@ async def export_one_account(
             client.close()
             if e.response.status_code in (401, 403):
                 return email, False, 0, 'BAD'
-            rot.invalidate()
+            if e.response.status_code == 405:
+                rot.remove_proxy(proxy)
+            else:
+                rot.invalidate()
             await asyncio.sleep(1)
         except Exception as e:
             last_err = str(e)
             if log: log(f"{email}: Unexpected error - {last_err}")
             try: client.close()
             except Exception: pass
-            if any(k in last_err.lower() for k in ("timeout","proxy","network","429","502","503","504","connection reset")):
+            err_low = last_err.lower()
+            if any(k in err_low for k in ("10060", "timeout", "not allowed")):
+                rot.remove_proxy(proxy)
+            elif any(k in err_low for k in ("proxy","network","429","502","503","504","connection reset")):
                 rot.invalidate()
             await asyncio.sleep(1)
     if log: log(f"{email}: Failed after retries - {last_err}")
@@ -479,6 +658,7 @@ async def run_batch(
     extended_log: bool = False,
     stop_event: Optional[asyncio.Event] = None,
     pause_event: Optional[asyncio.Event] = None,
+    use_async: bool = False,
 ) -> None:
     accounts = read_accounts(accounts_file)
     stop_event = stop_event or asyncio.Event()
@@ -517,6 +697,7 @@ async def run_batch(
                 log_fn,
                 extended_log,
                 stop_event,
+                use_async,
             )
             in_work -= 1
             if ok:
@@ -566,6 +747,7 @@ if GUI_AVAILABLE:
             no_proxy: bool = False,
             extended_log: bool = False,
             proxy_scheme: str = DEFAULT_PROXY_SCHEME,
+            fast_mode: bool = False,
         ):
             super().__init__()
             self.accounts_file = accounts_file
@@ -580,6 +762,7 @@ if GUI_AVAILABLE:
             self.no_proxy = no_proxy
             self.extended_log = extended_log
             self.proxy_scheme = proxy_scheme
+            self.fast_mode = fast_mode
             self.rot = ProxyRotator(
                 read_lines(proxies_file) if proxies_file else [],
                 proxy_ttl_min,
@@ -657,6 +840,7 @@ if GUI_AVAILABLE:
                         self.extended_log,
                         self.stop_event,
                         self.pause_event,
+                        use_async=self.fast_mode,
                     )
 
                 except Exception as e:
@@ -698,6 +882,8 @@ if GUI_AVAILABLE:
             lay.addWidget(self.noProxyChk)
             self.verboseChk = QCheckBox("Расширенный лог")
             lay.addWidget(self.verboseChk)
+            self.fastChk = QCheckBox("Быстрый режим")
+            lay.addWidget(self.fastChk)
 
 
             self.proxyCountLbl = QLabel("Proxies: 0")
@@ -772,6 +958,7 @@ if GUI_AVAILABLE:
                 no_proxy=self.noProxyChk.isChecked(),
                 extended_log=self.verboseChk.isChecked(),
                 proxy_scheme=self.schemeBox.currentText().lower(),
+                fast_mode=self.fastChk.isChecked(),
 
             )
             self.worker.logsig.connect(self.onLog)
@@ -860,6 +1047,7 @@ def main_cli() -> None:
     parser.add_argument("--no-proxy", action="store_true", help="Disable proxy usage")
     parser.add_argument("--extended-log", action="store_true", help="Show server responses")
     parser.add_argument("--proxy-scheme", choices=["socks5", "socks4", "http"], default="socks5", help="Proxy scheme for raw proxies")
+    parser.add_argument("--fast", action="store_true", help="Use async mode for faster processing")
 
 
     args = parser.parse_args()
@@ -877,7 +1065,7 @@ def main_cli() -> None:
             print(msg)
         def stats_cb(i: int, g: int, b: int, e: int):
             print(f"In work: {i} | Good: {g} | Bad: {b} | Error: {e}")
-        await run_batch(Path(args.accounts), Path(args.out), rot, args.threads_acc, args.retries, args.threads_note, args.timeout, log_cb, stats_cb, args.extended_log)
+        await run_batch(Path(args.accounts), Path(args.out), rot, args.threads_acc, args.retries, args.threads_note, args.timeout, log_cb, stats_cb, args.extended_log, use_async=args.fast)
 
     if sys.platform.startswith('win'):
         try:
