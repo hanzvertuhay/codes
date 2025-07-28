@@ -7,4 +7,4 @@ httpx
 socketio
 aiohttp
 aiohttp_socks
-PySide6.QtWidgets
+PySide6
