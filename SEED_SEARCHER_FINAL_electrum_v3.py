@@ -917,10 +917,6 @@ class Main(QWidget):
                         self.log_electrum.appendPlainText(f"{phrase}  |  {path}")
                     except Exception:
                         pass
-                    try:
-                        self.log_electrum.appendPlainText(f"{phrase}  |  {path}")
-                    except Exception:
-                        pass
         except Exception:
             pass
 
@@ -962,13 +958,14 @@ class Main(QWidget):
                 seen_set = self.seen_electrum_12 if n == 12 else self.seen_electrum_24
                 if phrase not in seen_set:
                     seen_set.add(phrase)
+                    self.count_electrum += 1
+                    try:
+                        self._update_counters()
+                    except Exception:
+                        pass
                     fname = f"electrum_valid_{n}.txt"
                     with open(self.results_dir / fname, "a", encoding="utf-8") as f:
                         f.write(f"{phrase} | {path}\n")
-                    try:
-                        self.log_electrum.appendPlainText(f"{phrase}  |  {path}")
-                    except Exception:
-                        pass
                     try:
                         self.log_electrum.appendPlainText(f"{phrase}  |  {path}")
                     except Exception:
