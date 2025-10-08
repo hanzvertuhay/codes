@@ -75,6 +75,12 @@ except Exception:
 BIP39 = Mnemonic("english")
 BIPSET = set(BIP39.wordlist)
 
+# ---- Heuristic thresholds ----
+MIN_UNIQUE_WORDS_ABSOLUTE = 5
+MIN_UNIQUE_WORD_RATIO = 1 / 3
+MAX_SINGLE_WORD_RATIO = 1 / 3
+MAX_BIGRAM_REPEAT_RATIO = 0.4
+
 # --- ETH helpers: detect private keys (64 hex) and addresses (0x40 hex). EIP-55 check optional ---
 ETH_PRIV_RE = re.compile(r"\b(?:0x)?[0-9A-Fa-f]{64}\b")
 ETH_ADDR_RE = re.compile(r"\b0x[0-9A-Fa-f]{40}\b")
@@ -637,11 +643,12 @@ def is_suspicious(phrase: str) -> bool:
     #  - очень мало разных слов (<= n/3) или всего <= 5 уникальных
     #  - одно слово встречается >= 1/3 всех позиций
     #  - повторяющиеся биграммы занимают >= 40% всех биграмм
-    if uniq <= max(5, n // 3):
+    min_unique_required = max(MIN_UNIQUE_WORDS_ABSOLUTE, int(n * MIN_UNIQUE_WORD_RATIO))
+    if uniq <= min_unique_required:
         return True
-    if max_rel >= 1/3:
+    if max_rel >= MAX_SINGLE_WORD_RATIO:
         return True
-    if bigram_rep_ratio >= 0.4:
+    if bigram_rep_ratio >= MAX_BIGRAM_REPEAT_RATIO:
         return True
 
     return False
