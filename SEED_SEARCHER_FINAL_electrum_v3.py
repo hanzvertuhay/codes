@@ -40,7 +40,7 @@ from PySide6.QtGui import QDesktopServices, QIcon, QAction
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QCheckBox, QListWidget, QProgressBar, QFileDialog, QMessageBox, QListWidgetItem,
-    QSplitter, QPlainTextEdit, QMenuBar, QStatusBar, QAbstractItemView
+    QSplitter, QPlainTextEdit, QMenuBar, QStatusBar, QAbstractItemView, QMenu
 )
 from mnemonic import Mnemonic
 
@@ -768,6 +768,9 @@ class Main(QWidget):
         self.list_valid.itemDoubleClicked.connect(self._reveal_in_folder)
         self.list_near.itemDoubleClicked.connect(self._reveal_in_folder)
         self.list_susp.itemDoubleClicked.connect(self._reveal_in_folder)
+        for lst in (self.list_valid, self.list_near, self.list_susp):
+            lst.setContextMenuPolicy(Qt.CustomContextMenu)
+            lst.customContextMenuRequested.connect(lambda pos, widget=lst: self._show_list_context_menu(widget, pos))
 
         # Log/preview
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard); self.log.setPlaceholderText("Журнал работы…")
@@ -831,6 +834,17 @@ class Main(QWidget):
         self.btn_start.clicked.connect(self.start_scan)
         self.btn_stop.clicked.connect(self.stop_scan)
         self.btn_export.clicked.connect(self.export_csv)
+
+    def _show_list_context_menu(self, lst: QListWidget, pos) -> None:
+        items = lst.selectedItems()
+        if not items:
+            return
+        menu = QMenu(self)
+        copy_action = menu.addAction("Копировать фразу")
+        action = menu.exec(lst.mapToGlobal(pos))
+        if action is copy_action:
+            phrases = "\n".join(item.text() for item in items)
+            QApplication.clipboard().setText(phrases)
 
     # --------- UI helpers ---------
     def _apply_dark_qss(self):
