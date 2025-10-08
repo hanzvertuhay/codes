@@ -29,7 +29,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool, cpu_count, freeze_support
 from pathlib import Path
 from typing import Iterable, List, Tuple, Dict, Set
 
@@ -1078,6 +1078,7 @@ def main():
     sys.exit(app.exec())
 
 if __name__ == "__main__":
+    freeze_support()
     main()
 # ---- Fatal error helper (shows dialog even without Qt) ----
 def _fatal_startup(msg: str):
