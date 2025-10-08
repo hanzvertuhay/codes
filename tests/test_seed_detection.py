@@ -31,10 +31,32 @@ def test_find_phrases_detects_various_lengths():
     }
 
     text = '\n'.join(mnemonics.values())
-    valid, near = mod.find_phrases_robust(text)
+    valid, near, electrum = mod.find_phrases_robust(text)
 
     assert not near
+    assert not electrum
     found = {len(v.split()): v for v in valid}
     assert set(found) == set(mnemonics)
     for length, phrase in mnemonics.items():
         assert found[length] == phrase
+
+
+def test_electrum_phrases_are_separated_and_checked():
+    electrum_phrase = (
+        "jungle patient foster select unit chase regret local romance oyster vanish act"
+    )
+    assert mod.is_electrum_new_seed(electrum_phrase)
+    text = f"header\n{electrum_phrase}\nfooter"
+    valid, near, electrum = mod.find_phrases_robust(text)
+
+    assert electrum == [electrum_phrase]
+    assert not valid
+    assert electrum_phrase in near
+
+
+def test_repeated_words_mark_phrase_suspicious():
+    phrase = (
+        "little boy twenty hello there little girl tiger there little girl tiger "
+        "hello there little boy mind there"
+    )
+    assert mod.is_suspicious(phrase)
