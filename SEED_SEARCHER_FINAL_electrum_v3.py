@@ -219,45 +219,8 @@ def extract_text(path: Path) -> str:
 
 # -------------------- Tokenization & detection --------------------
 
-# --- NEW: Strict tokenizer for LINEAR mode (break on punctuation and end-of-line; allow numeric labels) ---
 LABEL_WORD_RE = re.compile(r'^(?:#?\d{1,2})(?:[).:-])?([A-Za-z]+)$')
 LABEL_ONLY_RE = re.compile(r'^#?\d{1,2}[).:-]?$', re.IGNORECASE)
-
-def tokenize_with_breaks_strict(text: str) -> List[str]:
-    '''
-    Tokenize text so that any non-letter punctuation acts as a HARD break between BIP words.
-    Recognizes numeric labels like '1)word', '#2:word', '03.word' and extracts 'word' without breaking.
-    Adds a BREAK at end of each line.
-    '''
-    tokens: List[str] = []
-    for line in text.splitlines():
-        parts = re.split(r'[,\s]+', line)
-        for raw in parts:
-            if not raw:
-                continue
-            raw = raw.strip()
-            m = LABEL_WORD_RE.match(raw)
-            if m:
-                tokens.append(m.group(1).lower());  # keep as word
-                continue
-            if WORD_RE.fullmatch(raw):
-                tokens.append(raw.lower());  # word
-                continue
-            if LABEL_ONLY_RE.match(raw):
-                # pure numeric label like "1)", "#2." -> ignore (but do NOT break)
-                continue
-            # anything else (e.g., urls, slashes, pipes, etc.) => HARD break
-            tokens.append("|BREAK|")
-        tokens.append("|BREAK|")  # end-of-line is also a break
-    # collapse multiple BREAKs
-    out: List[str] = []
-    for t in tokens:
-        if t == "|BREAK|":
-            if out and out[-1] == "|BREAK|":
-                continue
-        out.append(t)
-    return out
-
 
 def tokenize_with_breaks_strict(text: str) -> List[str]:
     '''
