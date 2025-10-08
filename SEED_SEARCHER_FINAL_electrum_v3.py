@@ -837,6 +837,10 @@ class Main(QWidget):
             max_mb = 50
 
         self.list_valid.clear(); self.list_near.clear(); self.list_susp.clear(); self.log.clear()
+        self.count_seed = {12: 0, 15: 0, 18: 0, 24: 0}
+        self.count_electrum = 0
+        self.count_eth = 0
+        self._update_counters()
         self.progress_bar.setValue(0); self.progress_bar.setMaximum(0)
         self.btn_start.setEnabled(False); self.btn_stop.setEnabled(True); self.btn_export.setEnabled(False)
         self.seen_valid = {length: set() for length in VALID_LENGTHS}
