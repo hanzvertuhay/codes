@@ -7,7 +7,7 @@ Mnemonic/Seed Phrase Finder — Pro Edition (PySide6)
 РУССКИЙ ИНТЕРФЕЙС. Современная тёмная тема.
 
 Что умеет:
-- Надёжный поиск реальных BIP-39 seed-фраз (12/15/24 слов) без "генерации" из разрозненных слов.
+- Надёжный поиск реальных BIP-39 seed-фраз (12/15/18/21/24 слов) без "генерации" из разрозненных слов.
 - Понимает разные способы записи: в строку, в столбик, по 3–4 слова в строке, с номерами/точками/прочими разделителями.
 - Учитывает списки вида "1. слово", "2) слово", маркированные списки (•, -, *), смешанные цифры/точки/скобки.
 - Сканирует файлы нужных расширений (задаёте сами): .txt, .log, .md, .csv, .html/.htm, .docx, .doc (Windows COM), .xlsx, .xls, + опционально .pdf и .rtf (если библиотеки установлены).
@@ -64,7 +64,7 @@ def _excepthook(etype, value, tb):
 
 sys.excepthook = _excepthook
 # -------------------- Constants --------------------
-VALID_LENGTHS = (12, 15, 18, 24)
+VALID_LENGTHS = (12, 15, 18, 21, 24)
 # Глобальный флаг строгих разрывов (наследуется из GUI через переменную окружения)
 try:
     STRICT = (os.environ.get("MF_STRICT_BREAKS", "0") == "1")
@@ -395,7 +395,7 @@ def segments_from_stream(stream: List[str]) -> Iterable[List[str]]:
             segment.append(t)
 def sliding_phrases_from_stream(stream: List[str]) -> Iterable[List[str]]:
     """
-    Берём скользящим окном 12/15/24 по непрерывным участкам (без BREAK).
+    Берём скользящим окном 12/15/18/21/24 по непрерывным участкам (без BREAK).
     """
     segment: List[str] = []
     for t in stream + ["|BREAK|"]:
@@ -783,10 +783,10 @@ class Main(QWidget):
         self.worker: Worker | None = None
         self.results_dir: Path | None = None
         self.timestamp: str | None = None
-        self.seen_valid: Dict[int, Set[str]] = {12:set(), 15:set(), 18:set(), 24:set()}
+        self.seen_valid: Dict[int, Set[str]] = {length: set() for length in VALID_LENGTHS}
         self.seen_near: Set[str] = set()
         self.seen_susp: Set[str] = set()
-        self.count_seed: Dict[int,int] = {12:0,15:0,18:0,24:0}
+        self.count_seed: Dict[int, int] = {length: 0 for length in VALID_LENGTHS}
         self.count_electrum: int = 0
         self.count_eth: int = 0
 
@@ -839,7 +839,7 @@ class Main(QWidget):
         self.list_valid.clear(); self.list_near.clear(); self.list_susp.clear(); self.log.clear()
         self.progress_bar.setValue(0); self.progress_bar.setMaximum(0)
         self.btn_start.setEnabled(False); self.btn_stop.setEnabled(True); self.btn_export.setEnabled(False)
-        self.seen_valid = {12:set(), 15:set(), 18:set(), 24:set()}
+        self.seen_valid = {length: set() for length in VALID_LENGTHS}
         self.seen_near = set()
         self.seen_susp = set()
         self.seen_electrum_12 = set()
@@ -986,6 +986,8 @@ class Main(QWidget):
     def _update_counters(self):
         html = (f"Seed 12 word: <b><span style='color:#28a745'>{self.count_seed[12]}</span></b> &nbsp; "
                 f"Seed 15 word: <b><span style='color:#17a2b8'>{self.count_seed[15]}</span></b> &nbsp; "
+                f"Seed 18 word: <b><span style='color:#6f42c1'>{self.count_seed[18]}</span></b> &nbsp; "
+                f"Seed 21 word: <b><span style='color:#20c997'>{self.count_seed[21]}</span></b> &nbsp; "
                 f"Seed 24 word: <b><span style='color:#dc3545'>{self.count_seed[24]}</span></b> &nbsp; "
                 f"Electrum: <b><span style='color:#ff9800'>{self.count_electrum}</span></b> &nbsp; "
                 f"ETH key: <b><span style='color:#9c27b0'>{self.count_eth}</span></b>")
