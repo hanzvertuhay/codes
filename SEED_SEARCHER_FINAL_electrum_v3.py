@@ -1057,7 +1057,7 @@ class Main(QWidget):
         if not self.results_dir: return
         csv_path = self.results_dir / "results.csv"
         try:
-            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
                 w.writerow(["status", "length", "phrase", "file"])
                 for n, phrases in self.seen_valid.items():
