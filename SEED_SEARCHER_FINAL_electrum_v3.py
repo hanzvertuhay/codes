@@ -44,6 +44,8 @@ from PySide6.QtWidgets import (
 )
 from mnemonic import Mnemonic
 
+from electrum_v1 import is_old_seed_words
+
 
 # ---- Global exception hook ----
 def _qt_fatal(msg: str):
@@ -376,10 +378,21 @@ def is_electrum_new_seed(mnemonic: str) -> bool:
     '''
     Check Electrum 'new' seed (v2+) by HMAC-SHA512('Seed version', normalized_text) having a known prefix.
     '''
-    import hashlib, hmac, binascii
+    import hashlib, hmac
     x = _normalize_text_electrum(mnemonic)
     h = hmac.new(b"Seed version", x.encode('utf-8'), hashlib.sha512).hexdigest()
     return any(h.startswith(pfx) for pfx in ELECTRUM_PREFIXES)
+
+
+def is_electrum_old_seed(mnemonic: str) -> bool:
+    words = _normalize_text_electrum(mnemonic).split()
+    if not words:
+        return False
+    return is_old_seed_words(words)
+
+
+def is_electrum_seed(mnemonic: str) -> bool:
+    return is_electrum_new_seed(mnemonic) or is_electrum_old_seed(mnemonic)
 
 def words_in_line(line: str) -> List[str]:
     """Все английские слова в нижнем регистре из строки."""
@@ -611,6 +624,7 @@ def find_phrases_robust(text: str) -> Tuple[List[str], List[str]]:
         if c not in seen:
             candidates.append(c); seen.add(c)
 
+    check_electrum = os.environ.get('CHECK_ELECTRUM', '0') == '1'
     valid, near = [], []
     for phrase in candidates:
         words = phrase.split()
@@ -624,7 +638,7 @@ def find_phrases_robust(text: str) -> Tuple[List[str], List[str]]:
                 near.append(phrase)
             continue
         # Electrum path: allow 12/24 any english words (not only BIP39)
-        if all(re.fullmatch(r"[A-Za-z]+", w) for w in words) and is_electrum_new_seed(phrase):
+        if check_electrum and all(re.fullmatch(r"[A-Za-z]+", w) for w in words) and is_electrum_seed(phrase):
             near.append(phrase)
 
     return valid, near
@@ -752,6 +766,8 @@ class Main(QWidget):
         self.chk_typo12 = QCheckBox("Допускать 1 ошибку")
         self.chk_near = QCheckBox("Показывать невалидные (near)")
         self.chk_12list = QCheckBox("12 слов — только как список (anti-false)")
+        self.chk_electrum = QCheckBox("Проверять Electrum сиды (v1/v2)")
+        self.chk_electrum.setChecked(True)
         self.chk_eth = QCheckBox("Искать ETH ключи/адреса")
 
         self.btn_start = QPushButton("Старт"); self.btn_start.setProperty("accent", True)
@@ -800,6 +816,7 @@ class Main(QWidget):
         top2.addWidget(self.chk_typo12)
         top2b.addWidget(self.chk_near)
         top2b.addWidget(self.chk_12list)
+        top2b.addWidget(self.chk_electrum)
         top2b.addWidget(self.chk_eth)
         right = QVBoxLayout(); rw = QWidget(); rw.setLayout(right)
         right.addWidget(QLabel("Журнал"))
@@ -826,6 +843,10 @@ class Main(QWidget):
         self.count_seed: Dict[int,int] = {12:0,15:0,18:0,24:0}
         self.count_electrum: int = 0
         self.count_eth: int = 0
+        self.electrum_enabled: bool = False
+        self.seen_electrum_12: Set[str] = set()
+        self.seen_electrum_24: Set[str] = set()
+        self.electrum_results_active: bool = False
 
         # Signals
         self.btn_start.clicked.connect(self.start_scan)
@@ -879,9 +900,14 @@ class Main(QWidget):
         self.seen_valid = {12:set(), 15:set(), 18:set(), 24:set()}
         self.seen_near = set()
         self.seen_susp = set()
-        self.seen_electrum_12 = set()
-        self.seen_electrum_24 = set()
         self.seen_valid_12_typo = set()
+        self.count_electrum = 0
+        self.electrum_enabled = self.chk_electrum.isChecked()
+        self.electrum_results_active = self.electrum_enabled
+        if self.electrum_enabled:
+            self.seen_electrum_12 = set()
+            self.seen_electrum_24 = set()
+        self.log_electrum.clear()
         
         # reset additional tracking sets
         import os as _os
@@ -889,6 +915,7 @@ class Main(QWidget):
         _os.environ['SHOW_NEAR'] = '1' if self.chk_near.isChecked() else '0'
         _os.environ['STRICT_12_LIST_ONLY'] = '1' if self.chk_12list.isChecked() else '0'
         _os.environ['FIND_ETH'] = '1' if self.chk_eth.isChecked() else '0'
+        _os.environ['CHECK_ELECTRUM'] = '1' if self.electrum_enabled else '0'
         self.timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.results_dir = Path(folder) / f"Results_{self.timestamp}"
         self.results_dir.mkdir(exist_ok=True)
@@ -934,28 +961,24 @@ class Main(QWidget):
             except Exception:
                 pass
         # Electrum check (save separately) for 12/24 words
-        try:
-            n = len(phrase.split())
-            if n in (12, 24) and is_electrum_new_seed(phrase):
-                seen_set = self.seen_electrum_12 if n == 12 else self.seen_electrum_24
-                if phrase not in seen_set:
-                    seen_set.add(phrase)
-                    self.count_electrum += 1
-                    self._update_counters()
-                    # write to files
-                    fname = f"electrum_valid_{n}.txt"
-                    with open(self.results_dir / fname, "a", encoding="utf-8") as f:
-                        f.write(f"{phrase} | {path}\n")
-                    try:
-                        self.log_electrum.appendPlainText(f"{phrase}  |  {path}")
-                    except Exception:
-                        pass
-                    try:
-                        self.log_electrum.appendPlainText(f"{phrase}  |  {path}")
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        if self.electrum_enabled:
+            try:
+                n = len(phrase.split())
+                if n in (12, 24) and is_electrum_seed(phrase):
+                    seen_set = self.seen_electrum_12 if n == 12 else self.seen_electrum_24
+                    if phrase not in seen_set:
+                        seen_set.add(phrase)
+                        self.count_electrum += 1
+                        self._update_counters()
+                        fname = f"electrum_valid_{n}.txt"
+                        with open(self.results_dir / fname, "a", encoding="utf-8") as f:
+                            f.write(f"{phrase} | {path}\n")
+                        try:
+                            self.log_electrum.appendPlainText(f"{phrase}  |  {path}")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
 
     def on_found_susp(self, phrase: str, path: str):
@@ -989,25 +1012,22 @@ class Main(QWidget):
             pass
 
         # Electrum check (save separately) for 12/24 words (even if not BIP39-valid)
-        try:
-            n = len(phrase.split())
-            if n in (12, 24) and is_electrum_new_seed(phrase):
-                seen_set = self.seen_electrum_12 if n == 12 else self.seen_electrum_24
-                if phrase not in seen_set:
-                    seen_set.add(phrase)
-                    fname = f"electrum_valid_{n}.txt"
-                    with open(self.results_dir / fname, "a", encoding="utf-8") as f:
-                        f.write(f"{phrase} | {path}\n")
-                    try:
-                        self.log_electrum.appendPlainText(f"{phrase}  |  {path}")
-                    except Exception:
-                        pass
-                    try:
-                        self.log_electrum.appendPlainText(f"{phrase}  |  {path}")
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        if self.electrum_enabled:
+            try:
+                n = len(phrase.split())
+                if n in (12, 24) and is_electrum_seed(phrase):
+                    seen_set = self.seen_electrum_12 if n == 12 else self.seen_electrum_24
+                    if phrase not in seen_set:
+                        seen_set.add(phrase)
+                        fname = f"electrum_valid_{n}.txt"
+                        with open(self.results_dir / fname, "a", encoding="utf-8") as f:
+                            f.write(f"{phrase} | {path}\n")
+                        try:
+                            self.log_electrum.appendPlainText(f"{phrase}  |  {path}")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
 
     
@@ -1056,10 +1076,11 @@ class Main(QWidget):
                     w.writerow(["suspicious", len(phr.split()), phr, ""])
                 
                 # Electrum valid
-                for phr in sorted(self.seen_electrum_12):
-                    w.writerow(["electrum", 12, phr, ""])
-                for phr in sorted(self.seen_electrum_24):
-                    w.writerow(["electrum", 24, phr, ""])
+                if self.electrum_results_active:
+                    for phr in sorted(self.seen_electrum_12):
+                        w.writerow(["electrum", 12, phr, ""])
+                    for phr in sorted(self.seen_electrum_24):
+                        w.writerow(["electrum", 24, phr, ""])
                 # Typo-corrected 12-word valids
                 for phr in sorted(self.seen_valid_12_typo):
                     w.writerow(["valid_typo12", 12, phr, ""])
