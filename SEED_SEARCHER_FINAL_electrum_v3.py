@@ -695,10 +695,13 @@ class Worker(QThread):
         self.max_bytes = max_mb * 1024 * 1024 if max_mb > 0 else None
         self.follow_hidden = follow_hidden
         self._pool = None
+        self._stop = False
 
     def run(self):
         files: List[str] = []
         for p in self.root.rglob('*'):
+            if self._stop:
+                break
             if not p.is_file(): continue
             if p.suffix.lower() not in self.exts: continue
             if any(seg.lower() in self.exclude for seg in p.parts): continue
@@ -706,22 +709,56 @@ class Worker(QThread):
             if self.max_bytes and p.stat().st_size > self.max_bytes: continue
             files.append(str(p))
 
+        if self._stop:
+            self.done.emit()
+            return
+
         total = len(files)
         procs = max(cpu_count() - 1, 1)
         count = 0
-        with Pool(procs) as pool:
-            for path, valid, near, suspicious, eth in pool.imap_unordered(scan_file, files):
-                count += 1
-                for phr in valid:
-                    self.found_valid.emit(phr, path)
-                for phr in near:
-                        self.found_near.emit(phr, path)
-                for phr in suspicious:
-                    self.found_suspicious.emit(phr, path)
-                for k, v in eth:
-                    self.found_eth.emit(f"{k}:{v}", path)
-                self.progress.emit(count, total)
+        try:
+            with Pool(procs) as pool:
+                self._pool = pool
+                iterator = pool.imap_unordered(scan_file, files)
+                try:
+                    for path, valid, near, suspicious, eth in iterator:
+                        if self._stop:
+                            pool.terminate()
+                            try:
+                                pool.join()
+                            except Exception:
+                                pass
+                            break
+                        count += 1
+                        for phr in valid:
+                            self.found_valid.emit(phr, path)
+                        for phr in near:
+                                self.found_near.emit(phr, path)
+                        for phr in suspicious:
+                            self.found_suspicious.emit(phr, path)
+                        for k, v in eth:
+                            self.found_eth.emit(f"{k}:{v}", path)
+                        self.progress.emit(count, total)
+                except Exception:
+                    if not self._stop:
+                        raise
+        finally:
+            pool_ref = self._pool
+            self._pool = None
+            if pool_ref is not None and self._stop:
+                try:
+                    pool_ref.join()
+                except Exception:
+                    pass
         self.done.emit()
+
+    def request_stop(self) -> None:
+        self._stop = True
+        if self._pool is not None:
+            try:
+                self._pool.terminate()
+            except Exception:
+                pass
 
 # -------------------- GUI --------------------
 class Main(QWidget):
@@ -818,6 +855,7 @@ class Main(QWidget):
 
         # State
         self.worker: Worker | None = None
+        self._cancel_requested: bool = False
         self.results_dir: Path | None = None
         self.timestamp: str | None = None
         self.seen_valid: Dict[int, Set[str]] = {12:set(), 15:set(), 18:set(), 24:set()}
@@ -893,20 +931,21 @@ class Main(QWidget):
         self.results_dir = Path(folder) / f"Results_{self.timestamp}"
         self.results_dir.mkdir(exist_ok=True)
 
+        self._cancel_requested = False
         self.worker = Worker(Path(folder), self._parse_exts(), self._parse_exclude(), max_mb, self.chk_hidden.isChecked())
         self.worker.progress.connect(self.on_progress)
         self.worker.found_valid.connect(self.on_found_valid)
         self.worker.found_near.connect(self.on_found_near)
         self.worker.found_suspicious.connect(self.on_found_susp)
         self.worker.found_eth.connect(self.on_found_eth)
-        self.worker.done.connect(self.on_done)
+        self.worker.done.connect(self._on_worker_done)
         self.worker.start()
         self.log.appendPlainText(f"Начат поиск в: {folder}")
 
     def stop_scan(self):
         if self.worker:
-            self.worker.terminate(); self.worker = None
-            self.on_done(cancelled=True)
+            self._cancel_requested = True
+            self.worker.request_stop()
 
     def on_progress(self, c: int, t: int):
         self.progress_bar.setMaximum(t if t > 0 else 0)
@@ -1035,6 +1074,12 @@ class Main(QWidget):
         path = text.split("|")[-1].strip()
         if Path(path).exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
+
+    def _on_worker_done(self):
+        cancelled = bool(getattr(self, '_cancel_requested', False))
+        self.worker = None
+        self.on_done(cancelled=cancelled)
+        self._cancel_requested = False
 
     def on_done(self, cancelled: bool = False):
         self.btn_start.setEnabled(True); self.btn_stop.setEnabled(False); self.btn_export.setEnabled(True)
