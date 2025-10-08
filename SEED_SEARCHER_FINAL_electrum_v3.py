@@ -882,7 +882,8 @@ class Main(QWidget):
         self.seen_electrum_12 = set()
         self.seen_electrum_24 = set()
         self.seen_valid_12_typo = set()
-        
+        self.count_eth = 0
+
         # reset additional tracking sets
         import os as _os
         _os.environ['MF_STRICT_BREAKS'] = '1' if self.chk_strict.isChecked() else '0'
@@ -1017,6 +1018,8 @@ class Main(QWidget):
         try:
             with open(self.results_dir / "eth_keys_found.txt", "a", encoding="utf-8") as f:
                 f.write(f"{kind_value} | {path}\n")
+            self.count_eth += 1
+            self._update_counters()
         except Exception:
             pass
     
