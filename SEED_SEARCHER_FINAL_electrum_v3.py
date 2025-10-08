@@ -490,7 +490,7 @@ def list_mode_candidates(lines: List[str]) -> Iterable[List[str]]:
     # финальный flush на случай, если закончилось без шума
     yield from flush()
 
-def find_phrases_robust(text: str) -> Tuple[List[str], List[str]]:
+def find_phrases_robust(text: str) -> Tuple[List[str], List[str], List[str]]:
     """
     Возвращает два списка:
       valid_phrases — с корректной checksum,
@@ -608,23 +608,33 @@ def find_phrases_robust(text: str) -> Tuple[List[str], List[str]]:
         if c not in seen:
             candidates.append(c); seen.add(c)
 
-    valid, near = [], []
+    valid, near, electrum_valid = [], [], []
     for phrase in candidates:
         words = phrase.split()
         if len(words) not in VALID_LENGTHS:
             continue
-        # Pure BIP39 path
-        if all((w in BIPSET) for w in words):
+        is_bip_words = all((w in BIPSET) for w in words)
+        is_electrum_candidate = len(words) in (12, 24) and all(re.fullmatch(r"[A-Za-z]+", w) for w in words)
+        electrum_ok = False
+        if is_electrum_candidate:
+            try:
+                electrum_ok = is_electrum_new_seed(phrase)
+            except Exception:
+                electrum_ok = False
+
+        if is_bip_words:
             if bip39_check(phrase):
                 valid.append(phrase)
             else:
                 near.append(phrase)
+            if electrum_ok:
+                electrum_valid.append(phrase)
             continue
-        # Electrum path: allow 12/24 any english words (not only BIP39)
-        if all(re.fullmatch(r"[A-Za-z]+", w) for w in words) and is_electrum_new_seed(phrase):
-            near.append(phrase)
 
-    return valid, near
+        if electrum_ok:
+            electrum_valid.append(phrase)
+
+    return valid, near, electrum_valid
 def is_suspicious(phrase: str) -> bool:
     """
     Определяет «подозрительность» валидной фразы: повторяются 2–3 слова, низкая уникальность,
@@ -663,19 +673,25 @@ def is_suspicious(phrase: str) -> bool:
     if bigram_rep_ratio >= MAX_BIGRAM_REPEAT_RATIO:
         return True
 
+    words_with_three = [w for w, c in cnt.items() if c >= 3]
+    if len(words_with_three) >= 2:
+        return True
+    if max_freq >= 4:
+        return True
+
     return False
 
 
 # -------------------- Worker --------------------
-def scan_file(path_str: str) -> Tuple[str, List[str], List[str], List[str], List[tuple[str,str]]]:
+def scan_file(path_str: str) -> Tuple[str, List[str], List[str], List[str], List[str], List[tuple[str,str]]]:
     text = extract_text(Path(path_str))
     if not text:
-        return path_str, [], [], [], []
-    valid, near = find_phrases_robust(text)
+        return path_str, [], [], [], [], []
+    valid, near, electrum_valid = find_phrases_robust(text)
     suspicious = [v for v in valid if is_suspicious(v)]
     valid_clean = [v for v in valid if v not in suspicious]
     eth = find_eth_keys(text) if os.environ.get('FIND_ETH','0') == '1' else []
-    return path_str, valid_clean, near, suspicious, eth
+    return path_str, valid_clean, near, suspicious, electrum_valid, eth
 
 if QT_AVAILABLE:
     class Worker(QThread):
@@ -683,6 +699,7 @@ if QT_AVAILABLE:
         found_valid = Signal(str, str)    # phrase, file
         found_near = Signal(str, str)     # phrase, file
         found_suspicious = Signal(str, str)  # phrase, file
+        found_electrum = Signal(str, str)  # phrase, file
         found_eth = Signal(str, str)  # kind:value, file
         done = Signal()
 
@@ -720,7 +737,7 @@ if QT_AVAILABLE:
                     self._pool = pool
                     iterator = pool.imap_unordered(scan_file, files)
                     try:
-                        for path, valid, near, suspicious, eth in iterator:
+                        for path, valid, near, suspicious, electrum_valid, eth in iterator:
                             if self._stop:
                                 pool.terminate()
                                 try:
@@ -732,9 +749,11 @@ if QT_AVAILABLE:
                             for phr in valid:
                                 self.found_valid.emit(phr, path)
                             for phr in near:
-                                    self.found_near.emit(phr, path)
+                                self.found_near.emit(phr, path)
                             for phr in suspicious:
                                 self.found_suspicious.emit(phr, path)
+                            for phr in electrum_valid:
+                                self.found_electrum.emit(phr, path)
                             for k, v in eth:
                                 self.found_eth.emit(f"{k}:{v}", path)
                             self.progress.emit(count, total)
@@ -955,6 +974,7 @@ if QT_AVAILABLE:
             self.worker.found_valid.connect(self.on_found_valid)
             self.worker.found_near.connect(self.on_found_near)
             self.worker.found_suspicious.connect(self.on_found_susp)
+            self.worker.found_electrum.connect(self.on_found_electrum)
             self.worker.found_eth.connect(self.on_found_eth)
             self.worker.done.connect(self._on_worker_done)
             self.worker.start()
@@ -990,25 +1010,6 @@ if QT_AVAILABLE:
                         f.write(f"{phrase} | {path}\n")
                 except Exception:
                     pass
-            # Electrum check (save separately) for 12/24 words
-            try:
-                n = len(phrase.split())
-                if n in (12, 24) and is_electrum_new_seed(phrase):
-                    seen_set = self.seen_electrum_12 if n == 12 else self.seen_electrum_24
-                    if phrase not in seen_set:
-                        seen_set.add(phrase)
-                        self.count_electrum += 1
-                        self._update_counters()
-                        # write to files
-                        fname = f"electrum_valid_{n}.txt"
-                        with open(self.results_dir / fname, "a", encoding="utf-8") as f:
-                            f.write(f"{phrase} | {path}\n")
-                        try:
-                            self.log_electrum.appendPlainText(f"{phrase}  |  {path}")
-                        except Exception:
-                            pass
-            except Exception:
-                pass
 
 
         def on_found_susp(self, phrase: str, path: str):
@@ -1041,25 +1042,36 @@ if QT_AVAILABLE:
             except Exception:
                 pass
 
-            # Electrum check (save separately) for 12/24 words (even if not BIP39-valid)
+        def on_found_electrum(self, phrase: str, path: str):
+            if not phrase:
+                return
+            n = len(phrase.split())
+            if n not in (12, 24):
+                return
             try:
-                n = len(phrase.split())
-                if n in (12, 24) and is_electrum_new_seed(phrase):
-                    seen_set = self.seen_electrum_12 if n == 12 else self.seen_electrum_24
-                    if phrase not in seen_set:
-                        seen_set.add(phrase)
-                        self.count_electrum += 1
-                        try:
-                            self._update_counters()
-                        except Exception:
-                            pass
-                        fname = f"electrum_valid_{n}.txt"
-                        with open(self.results_dir / fname, "a", encoding="utf-8") as f:
-                            f.write(f"{phrase} | {path}\n")
-                        try:
-                            self.log_electrum.appendPlainText(f"{phrase}  |  {path}")
-                        except Exception:
-                            pass
+                if not is_electrum_new_seed(phrase):
+                    return
+            except Exception:
+                return
+            if is_suspicious(phrase):
+                return
+            seen_set = self.seen_electrum_12 if n == 12 else self.seen_electrum_24
+            if phrase in seen_set:
+                return
+            seen_set.add(phrase)
+            try:
+                self.count_electrum += 1
+                self._update_counters()
+            except Exception:
+                pass
+            fname = f"electrum_valid_{n}.txt"
+            try:
+                with open(self.results_dir / fname, "a", encoding="utf-8") as f:
+                    f.write(f"{phrase} | {path}\n")
+            except Exception:
+                pass
+            try:
+                self.log_electrum.appendPlainText(f"{phrase}  |  {path}")
             except Exception:
                 pass
 
