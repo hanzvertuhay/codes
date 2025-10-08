@@ -22,6 +22,7 @@ Mnemonic/Seed Phrase Finder — Pro Edition (PySide6)
 from __future__ import annotations
 
 import csv
+import logging
 import os
 import string
 import re
@@ -152,13 +153,28 @@ def extract_text(path: Path) -> str:
 
         if ext == ".doc":
             # Windows only
-            import win32com.client  # type: ignore
-            word = win32com.client.Dispatch('Word.Application')
-            doc = word.Documents.Open(str(path), ReadOnly=True)
-            tmp = Path(tempfile.gettempdir()) / (path.stem + ".txt")
-            doc.SaveAs(str(tmp), FileFormat=2)
-            doc.Close(False); word.Quit()
-            return tmp.read_text(encoding='utf-8', errors='ignore')
+            word = doc = None
+            try:
+                import win32com.client  # type: ignore
+                word = win32com.client.Dispatch('Word.Application')
+                doc = word.Documents.Open(str(path), ReadOnly=True)
+                tmp = Path(tempfile.gettempdir()) / (path.stem + ".txt")
+                doc.SaveAs(str(tmp), FileFormat=2)
+                return tmp.read_text(encoding='utf-8', errors='ignore')
+            except Exception as exc:
+                logging.warning("Failed to extract text from %s via Word automation: %s", path, exc)
+                return ""
+            finally:
+                if doc is not None:
+                    try:
+                        doc.Close(False)
+                    except Exception as close_exc:
+                        logging.debug("Failed to close Word document %s: %s", path, close_exc)
+                if word is not None:
+                    try:
+                        word.Quit()
+                    except Exception as quit_exc:
+                        logging.debug("Failed to quit Word application: %s", quit_exc)
 
         if ext == ".xlsx":
             import openpyxl
